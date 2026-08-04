@@ -50,15 +50,23 @@ HLFeed.stream()  --msg-->  run.main loop
    median recompute is amortized (`reach_refresh`, `swspan.refresh`). Measured ~2–20 µs (0.006 % of budget) — do
    not move an O(n) computation into `on_trade`.
 4. **Config-driven.** New knobs go in `config.yaml`, read via `cfg`. No magic numbers in code.
-5. **The execution boundary.** Do NOT hard-code keys, do NOT weaken `live_safety`, do NOT ship live order code you
-   haven't verified in `dry_run`. Default mode stays `paper`.
+5. **The execution boundary.** Do NOT hard-code keys, do NOT weaken `live_safety`, do NOT flip `dry_run: false`
+   on live order code you haven't verified over a full `dry_run` session against your SDK version. Default mode
+   stays `paper`. The exit is reduce-only + post-only and the stop/fallback are reduce-only market closes — keep
+   them reduce-only so an exit can never open or flip a position.
 
-## Live execution — what's done vs what you must finish (§Live)
-`LiveExecution` reuses the paper DECISION logic and, when `dry_run: false`, sends the **entry** via the HL SDK
-(`market_open`). The **exit** (post-only limit at the improve level) and **stop** (market close) send-paths, and
-**fill polling** (via `Info.user_state`), are intentionally left for you to implement + test against your SDK
-version — they move real money and cannot be validated here. Process: implement in `LiveExecution`, run with
-`dry_run: true` (it logs intended orders), watch a full session, reconcile against the paper sim, then flip live.
+## Live execution — implemented, but verify against YOUR SDK before trusting (§Live)
+`LiveExecution` reuses the paper DECISION logic and, when `dry_run: false`, now sends the **full lifecycle**:
+**entry** (`market_open`), the **maker-improve exit** (reduce-only post-only `Alo` limit via `ex.order`), the
+**path stop** and the **exit-window taker fallback** (`market_close`, after cancelling any resting exit), plus
+**fill confirmation** by polling `Info.user_state` (position flattened ⇒ reduce-only filled). `dry_run: true`
+logs every one of those orders without sending and drives fills from the paper queue-sim, so a dry session
+produces a comparable PnL trace. **What is NOT auto-validated:** the exact SDK call signatures / order-type
+shapes / `user_state` response layout vary by `hyperliquid-python-sdk` version — the send-paths are marked
+with ⚠ and MUST be confirmed against your installed version. Process unchanged: run `mode: live` +
+`dry_run: true`, watch a FULL session of the logged orders, reconcile against the paper sim, then flip
+`dry_run: false` yourself. Recorded exit prices are estimates — real PnL is reconciled from HL fills; the
+estimate only feeds the daily-loss brake. Assumes one position per coin at a time (burst dedup guarantees it).
 
 ## Common edits
 - **Universe:** edit `config.yaml: universe` (and rebuild seed for new tokens: `tools/build_seed.py`).

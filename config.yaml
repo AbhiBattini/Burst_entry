@@ -36,9 +36,12 @@ execution:
   exitwin_s: 60                 # maker-improve exit resting window
   size_usd: 10000               # per-position target; depth-aware sizing may shrink it
   slip_budget_bps: 30           # depth-aware sizing: largest notional fillable within this of touch
+  # NOTE size_usd below is the RESEARCH default (10000). For a ~$1k live account it is bounded down to
+  # live_safety.max_notional_usd per order — set that (below) to your real per-trade cap.
   stop_bps: 100                 # path stop
   maker_improve_ticks: 1        # post the exit this many ticks inside the touch
-  max_open: 5                   # per-burst gross cap (max concurrent open positions)
+  max_open: 2                   # per-burst gross cap (max concurrent open positions). Research default 5; lowered
+                                # for a ~$1k account (2 x size_usd = ~$2k gross ≈ 2x). Raise as capital grows.
 
 fees:                           # ASSUMED HL fees for paper PnL; live uses actual fills
   taker_bps: 4.5
@@ -53,7 +56,9 @@ recorder:
   flush_s: 600
 
 live_safety:                    # only consulted in mode: live
-  dry_run: true                 # true = LOG the order it would place, do NOT send. Flip to false only after verifying.
-  max_notional_usd: 10000       # hard cap per order
-  daily_loss_stop_usd: 500      # halt new entries after this realized loss in a UTC day
+  dry_run: true                 # true = LOG every order it would place (entry/exit/cancel/stop), do NOT send.
+                                # Flip to false ONLY after watching a full dry_run session with mode: live.
+  max_notional_usd: 1000        # hard cap per order. Sized for a ~$1k account (research example used 10000).
+  daily_loss_stop_usd: 80       # halt new entries after this (est) realized loss in a UTC day (~8% of $1k)
+  fill_poll_s: 2.0              # how often to reconcile live fills via user_state (live only; dry uses queue-sim)
   killswitch_file: ./KILL       # if this file exists, no new entries (touch KILL to stop instantly)
