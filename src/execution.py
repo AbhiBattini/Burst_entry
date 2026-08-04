@@ -299,8 +299,7 @@ class LiveExecution(PaperExecution):
     def _live_exit_fill_frac(self, pos, now_ns):
         """Fraction of the position the resting maker exit has filled. dry: tape model (parent on_trade fills
         pos['cum']). live: throttled query_order_by_oid, filled/total. Returns 0..1."""
-        if self.dry:
-            denom = pos["q_ahead"] + pos["q_you"]                          # paper model: queue-ahead + own size
+        if self.dry:                                                       # paper model: (filled beyond queue-ahead) / own size
             return float(np.clip((pos["cum"] - pos["q_ahead"]) / pos["q_you"], 0.0, 1.0)) if pos["q_you"] > 0 else 0.0
         if (now_ns - pos["last_poll"]) / 1e6 < self.fill_poll_ms or pos["exit_oid"] in (None, -1):
             return 0.0
