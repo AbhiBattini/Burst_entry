@@ -1,0 +1,19 @@
+[Unit]
+Description=Strategy A live (Track 69) — HL burst-entry follow
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__WORKDIR__
+EnvironmentFile=__WORKDIR__/.env
+ExecStart=__WORKDIR__/.venv/bin/python -m src.run
+Restart=always
+RestartSec=5
+# crash-loop backstop
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Install]
+WantedBy=multi-user.target

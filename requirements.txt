@@ -1,0 +1,10 @@
+# core (paper + signal engine)
+websockets>=12
+numpy>=1.26
+pandas>=2.0
+pyarrow>=14
+pyyaml>=6
+
+# live execution only (mode: live) — safe to omit until you go live:
+# hyperliquid-python-sdk>=0.9
+# eth-account>=0.11

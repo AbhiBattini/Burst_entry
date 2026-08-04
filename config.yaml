@@ -1,0 +1,59 @@
+# Strategy A (Track 69) — live deployable spec. All tunables live here; code reads only from this file + seed.json.
+# Values are the RESEARCH-VALIDATED defaults (see notes §Z–§Z.13 / AGENTS.md). Change with care.
+
+mode: paper                     # paper | live   (live = real orders; requires .env key + live_safety review)
+
+universe: [XRP, SUI, DOGE, LTC, SOL, TON, ADA, AVAX, LINK, BCH, HYPE, AAVE, CRV, INJ, MORPHO, XPL, PUMP]
+
+endpoint:                       # in-region from the Tokyo box these resolve to HL's Tokyo infra
+  ws:   wss://api.hyperliquid.xyz/ws
+  rest: https://api.hyperliquid.xyz
+
+detection:                      # sweep = reach >= max(floor, trailing p99.8 of fresh reach per book)
+  reach_floor_bps: 30           # the cost floor (post-gate break-even ~10; 30 is the deployable trigger)
+  reach_pctile: 99.8
+  reach_buf: 5000               # rolling fresh-reach buffer per book
+  reach_min_count: 400          # warm-up before the rolling p99.8 overrides the seed
+  reach_refresh: 200            # recompute p99.8 every N fresh trades (keeps the hot path cheap)
+  fresh_ms: 100                 # trade counts only if book age < this (kills stale-book artifacts + reconnect staleness)
+
+breadth:                        # the common-factor gate
+  window_s: 120                 # trailing window for "other books swept same dir"
+  min_k: 1                      # require >= this many (>=1 = the validated burst-entry trigger)
+
+swspan:                         # cluster-depth gate
+  cluster_s: 0.4                # forward cluster window after the trigger (also the reaction budget)
+  hist_len: 4000
+  min_count: 30                 # warm-up before the rolling median overrides the seed
+  refresh: 20
+
+burst:
+  cooldown_s: 120               # burst-entry dedup: 1 signal / direction / cooldown
+
+execution:
+  reaction_s: 0.4               # entry latency budget (signal fires cluster_s after the trigger)
+  hold_s: 120
+  exitwin_s: 60                 # maker-improve exit resting window
+  size_usd: 10000               # per-position target; depth-aware sizing may shrink it
+  slip_budget_bps: 30           # depth-aware sizing: largest notional fillable within this of touch
+  stop_bps: 100                 # path stop
+  maker_improve_ticks: 1        # post the exit this many ticks inside the touch
+  max_open: 5                   # per-burst gross cap (max concurrent open positions)
+
+fees:                           # ASSUMED HL fees for paper PnL; live uses actual fills
+  taker_bps: 4.5
+  maker_bps: 1.44
+
+clock:
+  restrict_utc_hours: []        # [] = trade all hours; e.g. [14,15,16,17] to trade only the US session (edge concentrates there)
+
+recorder:
+  enabled: true
+  dir: ./data                   # tees trades + L2 snapshots (free forward-OOS data)
+  flush_s: 600
+
+live_safety:                    # only consulted in mode: live
+  dry_run: true                 # true = LOG the order it would place, do NOT send. Flip to false only after verifying.
+  max_notional_usd: 10000       # hard cap per order
+  daily_loss_stop_usd: 500      # halt new entries after this realized loss in a UTC day
+  killswitch_file: ./KILL       # if this file exists, no new entries (touch KILL to stop instantly)
