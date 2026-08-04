@@ -56,9 +56,10 @@ recorder:
   flush_s: 600
 
 live_safety:                    # only consulted in mode: live
-  dry_run: true                 # true = LOG every order it would place (entry/exit/cancel/stop), do NOT send.
-                                # Flip to false ONLY after watching a full dry_run session with mode: live.
-  max_notional_usd: 1000        # hard cap per order. Sized for a ~$1k account (research example used 10000).
-  daily_loss_stop_usd: 80       # halt new entries after this (est) realized loss in a UTC day (~8% of $1k)
-  fill_poll_s: 2.0              # how often to reconcile live fills via user_state (live only; dry uses queue-sim)
+  dry_run: true                 # true = LOG the order it would place, do NOT send. Flip to false only after verifying.
+  max_notional_usd: 10000       # hard cap per order
+  daily_loss_stop_usd: 500      # halt new entries after this realized loss in a UTC day (fed by realized closes)
   killswitch_file: ./KILL       # if this file exists, no new entries (touch KILL to stop instantly)
+  fill_poll_ms: 500             # live only: throttle for resting maker-exit fill queries (query_order_by_oid)
+  reconcile_on_start: true      # live only: on boot, handle any orphaned position/order (process died mid-trade)
+  reconcile_mode: flatten       # flatten = cancel stray orders + market-close stale positions | report = log only, don't send
