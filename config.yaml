@@ -57,8 +57,9 @@ recorder:
 
 live_safety:                    # only consulted in mode: live
   dry_run: true                 # true = LOG the order it would place, do NOT send. Flip to false only after verifying.
-  max_notional_usd: 10000       # hard cap per order
-  daily_loss_stop_usd: 500      # halt new entries after this realized loss in a UTC day (fed by realized closes)
+  max_notional_usd: 1000        # hard cap per order. Sized for a ~$1k account (research example used 10000);
+                                # this is the REAL per-trade cap — size_usd above is bounded down to it.
+  daily_loss_stop_usd: 80       # halt new entries after this realized loss in a UTC day (~8% of $1k; fed by realized closes)
   killswitch_file: ./KILL       # if this file exists, no new entries (touch KILL to stop instantly)
   fill_poll_ms: 500             # live only: throttle for resting maker-exit fill queries (query_order_by_oid)
   reconcile_on_start: true      # live only: on boot, handle any orphaned position/order (process died mid-trade)
