@@ -36,9 +36,12 @@ execution:
   exitwin_s: 60                 # maker-improve exit resting window
   size_usd: 10000               # per-position target; depth-aware sizing may shrink it
   slip_budget_bps: 30           # depth-aware sizing: largest notional fillable within this of touch
+  # NOTE size_usd below is the RESEARCH default (10000). For a ~$1k live account it is bounded down to
+  # live_safety.max_notional_usd per order — set that (below) to your real per-trade cap.
   stop_bps: 100                 # path stop
   maker_improve_ticks: 1        # post the exit this many ticks inside the touch
-  max_open: 5                   # per-burst gross cap (max concurrent open positions)
+  max_open: 2                   # per-burst gross cap (max concurrent open positions). Research default 5; lowered
+                                # for a ~$1k account (2 x size_usd = ~$2k gross ≈ 2x). Raise as capital grows.
 
 fees:                           # ASSUMED HL fees for paper PnL; live uses actual fills
   taker_bps: 4.5

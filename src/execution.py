@@ -152,7 +152,7 @@ class LiveExecution(PaperExecution):
             if not self.addr:
                 self.addr = acct.address                        # trade FOR the signer if no master given
         log.warning(f"LiveExecution dry_run={self.dry} max_notional=${self.max_notional} "
-                    f"daily_loss_stop=${self.daily_loss_stop} killswitch={self.kill.name}")
+                    f"daily_loss_stop=${self.daily_loss_stop} poll={self.poll_s}s killswitch={self.kill.name}")
 
     # --- risk gate -------------------------------------------------------
     def _blocked(self):

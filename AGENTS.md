@@ -50,8 +50,10 @@ HLFeed.stream()  --msg-->  run.main loop
    median recompute is amortized (`reach_refresh`, `swspan.refresh`). Measured ~2–20 µs (0.006 % of budget) — do
    not move an O(n) computation into `on_trade`.
 4. **Config-driven.** New knobs go in `config.yaml`, read via `cfg`. No magic numbers in code.
-5. **The execution boundary.** Do NOT hard-code keys, do NOT weaken `live_safety`, do NOT ship live order code you
-   haven't verified in `dry_run`. Default mode stays `paper`.
+5. **The execution boundary.** Do NOT hard-code keys, do NOT weaken `live_safety`, do NOT flip `dry_run: false`
+   on live order code you haven't verified over a full `dry_run` session against your SDK version. Default mode
+   stays `paper`. The exit is reduce-only + post-only and the stop/fallback are reduce-only market closes — keep
+   them reduce-only so an exit can never open or flip a position.
 
 ## Live execution — what's done vs what you must verify (§Live)
 `LiveExecution` now runs the **full open-position lifecycle** with real orders: **entry** (`market_open`),
