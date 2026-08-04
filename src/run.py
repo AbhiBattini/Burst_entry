@@ -47,6 +47,7 @@ async def main():
     strat = StrategyA(cfg, seed, market)
     Exec = LiveExecution if cfg["mode"] == "live" else PaperExecution
     execu = Exec(cfg, market, log)
+    execu.reconcile_on_start()                       # flatten any orphaned position/order before trading (live only)
     rec = Recorder(cfg, execu.closed)
     feed = HLFeed(cfg["endpoint"]["ws"], cfg["universe"])
     deadline = time.time() + args.duration if args.duration else None

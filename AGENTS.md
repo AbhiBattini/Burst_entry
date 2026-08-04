@@ -53,12 +53,34 @@ HLFeed.stream()  --msg-->  run.main loop
 5. **The execution boundary.** Do NOT hard-code keys, do NOT weaken `live_safety`, do NOT ship live order code you
    haven't verified in `dry_run`. Default mode stays `paper`.
 
-## Live execution — what's done vs what you must finish (§Live)
-`LiveExecution` reuses the paper DECISION logic and, when `dry_run: false`, sends the **entry** via the HL SDK
-(`market_open`). The **exit** (post-only limit at the improve level) and **stop** (market close) send-paths, and
-**fill polling** (via `Info.user_state`), are intentionally left for you to implement + test against your SDK
-version — they move real money and cannot be validated here. Process: implement in `LiveExecution`, run with
-`dry_run: true` (it logs intended orders), watch a full session, reconcile against the paper sim, then flip live.
+## Live execution — what's done vs what you must verify (§Live)
+`LiveExecution` now runs the **full open-position lifecycle** with real orders: **entry** (`market_open`),
+**maker-improve exit** (post-only `Alo` reduce-only limit at the improve level), **taker-fallback** at the
+exit window end (`market_close`), **100 bps path stop** (cancel resting exit + `market_close`), and **real
+fill polling** of the resting exit (`Info.query_order_by_oid`, throttled by `live_safety.fill_poll_ms`).
+Realized closes feed `daily_loss_stop`. `poll()` is a **full reimplementation** of the paper timing (not
+inherited) so the exact live code path runs under `dry_run: true` too — dry_run logs every intended order and
+models fills off the paper tape, so a dry session reconciles 1:1 against `PaperExecution`.
+
+**What you MUST still verify before `dry_run: false`** (these move real money and cannot be validated here):
+1. **SDK method signatures** for YOUR `hyperliquid-python-sdk` version — they drift release-to-release. The
+   wire-touching code is isolated to the `_live_*` helpers + the `_avg_px`/`_oid` response parsers; audit those.
+   The four calls: `ex.market_open(coin,is_buy,sz,None,slippage)`, `ex.order(coin,is_buy,sz,px,{"limit":{"tif":"Alo"}},reduce_only=True)`,
+   `ex.cancel(coin,oid)`, `ex.market_close(coin)`, and `info.query_order_by_oid(addr,oid)`.
+2. **Response shapes** — `_avg_px`/`_oid`/`_live_exit_fill_frac` parse `response.data.statuses[*]` / the order
+   query defensively and fall back to a reference px with a WARNING; confirm the real shapes and remove the
+   guesswork. A failed fill query returns 0 (never fakes a fill) — good, but means a persistently-failing query
+   will ride to the taker-fallback at the window end. Watch for `[exit poll ERR]`/`[parse]` in the log.
+3. **Restart reconciliation** — `LiveExecution.reconcile_on_start()` runs once on boot (called by `run.py`
+   before the feed loop). It cancels stray resting orders and **flattens** any pre-existing position on
+   `cfg.universe` (the strategy horizon is ~120 s, so anything that outlived a restart is stale). It does NOT
+   adopt a position back into the state machine (entry_ts/px/breadth are unrecoverable). Knobs:
+   `live_safety.reconcile_on_start` (default true) and `reconcile_mode` (`flatten` | `report`). **For the very
+   first live boot, set `reconcile_mode: report`** to see what it would touch before it sends anything. If the
+   account queries fail it raises (fail-closed: don't trade blind to account state). Verify `info.open_orders`
+   and `info.user_state` shapes for your SDK version.
+Process: implement/verify in `LiveExecution`, run `dry_run: true`, watch a full session, reconcile against the
+paper sim, then flip live yourself.
 
 ## Common edits
 - **Universe:** edit `config.yaml: universe` (and rebuild seed for new tokens: `tools/build_seed.py`).
