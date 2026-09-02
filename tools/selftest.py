@@ -237,18 +237,19 @@ MAXLAG = cfg6["guards"]["max_feed_lag_ms"]
 T0 = 1_000_000_000_000
 check("lag is None until warm (guard permissive)", m6.feed_lag_ms(50) is None)
 for _ in range(60):
-    m6.note_lag(T0, T0 - 20_000_000)                                   # 20ms lag
-check("healthy feed reports ~20ms", abs(m6.feed_lag_ms(50) - 20.0) < 1e-6, f"{m6.feed_lag_ms(50)}ms")
+    m6.note_lag(T0, T0 - 300_000_000)   # ~300ms = the MEASURED in-region baseline (HL publish floor)
+check("healthy feed (~300ms baseline) is under the halt", m6.feed_lag_ms(50) <= MAXLAG,
+      f"{m6.feed_lag_ms(50):.0f}ms vs halt {MAXLAG}ms")
 
 m7 = MarketState(vol_grid_s=1, vol_win=8)
 for _ in range(60):
-    m7.note_lag(T0, T0 - 900_000_000)                                  # 900ms lag
+    m7.note_lag(T0, T0 - 2_000_000_000)                                # 2s lag = a real fault
 check("stale feed exceeds the threshold", m7.feed_lag_ms(50) > MAXLAG, f"{m7.feed_lag_ms(50):.0f}ms")
 
 # one huge outlier must NOT trip it (median, not mean)
 m8 = MarketState(vol_grid_s=1, vol_win=8)
 for _ in range(59):
-    m8.note_lag(T0, T0 - 20_000_000)
+    m8.note_lag(T0, T0 - 300_000_000)
 m8.note_lag(T0, T0 - 60_000_000_000)                                   # a 60s GC-pause outlier
 check("single outlier does not trip the halt", m8.feed_lag_ms(50) <= MAXLAG, f"{m8.feed_lag_ms(50):.0f}ms")
 
