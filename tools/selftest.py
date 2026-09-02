@@ -32,7 +32,8 @@ def check(name, cond, detail=""):
         FAILS.append(name)
 
 
-def mk(coins, cap=500.0, size=500.0, deep_ceiling=10.0, nmax=1, vol_win=8, quiet=True, deep_on=True):
+def mk(coins, cap=500.0, size=500.0, deep_ceiling=10.0, nmax=1, vol_win=8, quiet=True, deep_on=True,
+       max_open=99):
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
     cfg["universe"] = coins
     cfg["_root"] = ROOT
@@ -41,6 +42,8 @@ def mk(coins, cap=500.0, size=500.0, deep_ceiling=10.0, nmax=1, vol_win=8, quiet
     cfg["deep"]["vol_ceiling_bps_min"] = deep_ceiling
     cfg["deep"]["enabled"] = deep_on
     cfg["burst"]["nmax"] = nmax
+    # default max_open high so the cap/reserve tests exercise the DOLLAR cap, not the count cap
+    cfg["execution"]["max_open"] = max_open
     seed = {"reach_p998": {c: 30.0 for c in coins}, "swspan_median": 30.0}
     m = MarketState(vol_grid_s=1, vol_win=vol_win)
     log = logging.getLogger("selftest"); log.addHandler(logging.NullHandler())
@@ -171,8 +174,17 @@ ex.on_signal(Sig("BBB", 1.0, "BURST"))
 sizes = [p["size"] for p in ex.positions if p["status"] != "closed"]
 check("BURST still gets the reserved $250", len(sizes) == 2 and abs(sizes[1] - 250.0) < 1e-6, f"{sizes}")
 ex.on_signal(Sig("AAA", 1.0, "DEEP"))
-check("cap is hard (3rd entry refused)", len([p for p in ex.positions if p["status"] != "closed"]) == 2,
+check("gross cap is hard (3rd entry refused on $)", len([p for p in ex.positions if p["status"] != "closed"]) == 2,
       f"{len(ex.positions)} positions")
+
+# max_open is a SECOND, independent rail — check it binds on its own when it is the tighter one
+cfg2, s2, m2, ex2 = mk(COINS, cap=100_000.0, size=100_000.0, max_open=1)
+t2 = NS * 10_000
+book(m2, "AAA", t2); book(m2, "BBB", t2)
+ex2._now = lambda: t2
+ex2.on_signal(Sig("AAA", 1.0, "BURST")); ex2.on_signal(Sig("BBB", 1.0, "BURST"))
+n_open2 = len([p for p in ex2.positions if p["status"] != "closed"])
+check("max_open binds independently of the $ cap", n_open2 == 1, f"{n_open2} positions")
 
 # ── 5. capital derivation ───────────────────────────────────────────────────────────────────────────
 print("\n5. capital derivation from wallet equity (must reproduce the published configs)")

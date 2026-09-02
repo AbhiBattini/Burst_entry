@@ -60,14 +60,17 @@ HLFeed.stream()  --msg-->  run.main loop
 3. **Aggregate prints into orders before any percentile.** A per-print bar is a different filter on every tape
    (§AB.3, and [[threshold-units-mis-scale]]). Normalise the event unit first.
 4. **Hot path stays cheap.** Per-trade work is a dict lookup plus one comparison; percentile/median recompute is
-   amortized (`reach_refresh`, `swspan.refresh`). Do not move an O(n) computation into `on_trade`.
+   amortized (`reach_refresh`, `swspan.refresh`). Measured ~2–20 µs (0.006 % of budget) — do not move an O(n)
+   computation into `on_trade`.
 5. **Config-driven.** New knobs go in `config.yaml`, read via `cfg`. No magic numbers in code.
 5b. **Money is derived, never hand-set.** Anything dollar-denominated comes from `CapitalManager`. If you
    add a sizing knob, derive it there and adopt it in `apply_capital()` on BOTH strategy and execution —
    a rail that doesn't track equity (e.g. a $10k per-order cap left on a $500 book) is the failure mode.
    Never resize while a position is open.
-6. **The execution boundary.** Do NOT hard-code keys, do NOT weaken `live_safety`, do NOT ship live order code you
-   haven't verified in `dry_run`. Default mode stays `paper`.
+6. **The execution boundary.** Do NOT hard-code keys, do NOT weaken `live_safety`, do NOT flip `dry_run: false`
+   on live order code you haven't verified over a full `dry_run` session against your SDK version. Default mode
+   stays `paper`. **The exit is reduce-only + post-only and the stop/fallback are reduce-only market closes —
+   keep them reduce-only so an exit can never open or flip a position.**
 7. **Run `tools/selftest.py` after touching strategy or execution.** It catches the silent failures: an order that
    fires per-print, a solo sweep that fires BURST (edge inverted), a DEEP that ignores the vol ceiling, a reserve
    that doesn't reserve.

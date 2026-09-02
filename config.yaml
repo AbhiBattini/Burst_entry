@@ -98,7 +98,9 @@ execution:
                                 # ~$20k in the Oct-10 cascade vs ~$101k calm, §AF).
   stop_bps: 100                 # path stop
   maker_improve_ticks: 1        # post the exit this many ticks inside the touch
-  max_open: 5                   # secondary hard cap on concurrent positions (the gross cap is primary)
+  max_open: 2                   # secondary hard cap on concurrent POSITIONS (the gross $ cap is primary and
+                                # already binds at small equity). Research default 5; held at 2 as a cheap
+                                # belt for a small account. Raise as capital grows.
 
 fees:                           # ASSUMED HL fees for paper PnL; live uses actual fills. A $500-$10k book is
   taker_bps: 4.5                # base tier — rebates are unreachable at this volume ([[hl-maker-fee-...]]).
@@ -115,9 +117,10 @@ recorder:
 live_safety:                    # only consulted in mode: live
   dry_run: true                 # true = LOG the order it would place, do NOT send. Flip only after verifying.
                                 # max_notional_usd and daily_loss_stop_usd are DERIVED from `capital:` above
-                                # (per-trade size, and 5% of equity — the §AF intraday cap, which never
-                                # tripped in-sample: worst research day -$87 on a $100k book. Untested
-                                # insurance, not a proven guard).
+                                # (per-trade size, and daily_loss_frac x equity — the §AF intraday cap, which
+                                # never tripped in-sample: worst research day -$87 on a $100k book. Untested
+                                # insurance, not a proven guard). At $1k equity that is a $50 stop; set
+                                # capital.daily_loss_frac if you want a different fraction.
   killswitch_file: ./KILL       # if this file exists, no new entries (touch KILL to stop instantly)
   fill_poll_ms: 500             # live only: throttle for resting maker-exit fill queries (query_order_by_oid)
   reconcile_on_start: true      # live only: on boot, handle any orphaned position/order (process died mid-trade)
