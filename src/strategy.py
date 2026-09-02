@@ -30,7 +30,7 @@ NS = 1_000_000_000
 class MarketState:
     """Live order-book + trade tape state, updated by the feed; read by strategy + execution.
     Also maintains the 10s-grid trailing volatility (bps/min) that gates the DEEP sleeve."""
-    def __init__(self, trade_buf=4000, vol_grid_s=10, vol_win=180):
+    def __init__(self, trade_buf=4000, vol_grid_s=10, vol_win=180, lag_buf=200):
         self.book = {}       # coin -> dict(bid, ask, mid, t, bids=[(px,sz)], asks=[(px,sz)])
         self.tick = {}       # coin -> estimated price tick
         self.trades = defaultdict(lambda: deque(maxlen=trade_buf))   # coin -> (t_ns, px, dir)
@@ -38,6 +38,7 @@ class MarketState:
         self._vt = {}                                                # coin -> last grid bucket
         self._vm = {}                                                # coin -> last grid mid
         self._vr = defaultdict(lambda: deque(maxlen=vol_win))        # coin -> log returns on the grid
+        self._lag = deque(maxlen=lag_buf)                            # ms from exchange stamp to our receipt
 
     def update_l2(self, coin, bids, asks, t_ns):
         if not bids or not asks:
@@ -61,6 +62,20 @@ class MarketState:
         if r is None or len(r) < self.VW // 2:
             return float("nan")
         return float(np.std(np.asarray(r), ddof=1) * np.sqrt(6.0) * 1e4)
+
+    def note_lag(self, recv_ns, msg_ts_ns):
+        """Record feed lag for one message. This is the honest measure of how stale our view of the book
+        is at decision time — it costs nothing (no extra requests) and it is what the 0.4s reaction budget
+        is actually spent on. Assumes an NTP-synced clock; see feed_lag_ms for the skew guard."""
+        self._lag.append((recv_ns - msg_ts_ns) / 1e6)
+
+    def feed_lag_ms(self, min_samples=50):
+        """Rolling MEDIAN feed lag in ms (median, not mean: one GC pause must not trip a halt).
+        None until warm. A persistently NEGATIVE median means the local clock is ahead of the exchange
+        (NTP problem), not a fast feed — the caller flags that rather than treating it as healthy."""
+        if len(self._lag) < min_samples:
+            return None
+        return float(np.median(np.asarray(self._lag)))
 
     def add_trade(self, coin, px, de, t_ns):
         self.trades[coin].append((t_ns, px, de))

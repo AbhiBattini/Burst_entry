@@ -102,6 +102,15 @@ execution:
                                 # already binds at small equity). Research default 5; held at 2 as a cheap
                                 # belt for a small account. Raise as capital grows.
 
+guards:                         # feed-health halt. Independent of the killswitch and the daily loss stop.
+  max_feed_lag_ms: 400          # HALT NEW ENTRIES while the rolling median feed lag exceeds this. The whole
+                                # reaction budget is 400ms (swspan.cluster_s), so a feed this stale means the
+                                # book we would trade on is already older than the trade we are trying to make.
+                                # In-region (ap-northeast-1) expect single-digit to ~50ms; 400 is a FAULT
+                                # threshold, not a tuning dial. Open positions keep managing their own exits.
+  lag_min_samples: 50           # warm-up before the guard can trip (median over the last 200 messages)
+  lag_log_s: 60                 # how often to log feed health while healthy
+
 fees:                           # ASSUMED HL fees for paper PnL; live uses actual fills. A $500-$10k book is
   taker_bps: 4.5                # base tier — rebates are unreachable at this volume ([[hl-maker-fee-...]]).
   maker_bps: 1.44

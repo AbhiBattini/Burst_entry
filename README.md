@@ -27,6 +27,9 @@ the **deployable system** distilled from that.
 - **Execution:** taker entry ~0.4 s after the trigger, depth-aware size (largest notional filling within 30 bps of
   touch), 120 s hold, 100 bps path stop, maker post-only exit one tick inside the touch (60 s window, taker
   fallback).
+- **Feed-health halt:** new entries stop while the rolling median l2Book lag exceeds `guards.max_feed_lag_ms`
+  (400 ms — the entire reaction budget). Open positions keep managing their own exits, and entries resume on
+  their own when lag recovers. In-region expect single-digit to ~50 ms.
 - **Universe: 31 names** (HL top-40 perps by 24 h notional). BTC/ETH almost never fire a trade of their own but
   supply breadth for everyone else — monitor them anyway.
 

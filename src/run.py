@@ -46,6 +46,8 @@ async def main():
     args = ap.parse_args()
     cfg, seed = load()
     log = setup_log(cfg["_root"])
+    gd = cfg["guards"]
+    MAX_LAG, LAG_MINN, LAG_LOG_S = gd["max_feed_lag_ms"], gd["lag_min_samples"], gd["lag_log_s"]
     vol_grid_s, vol_win = 10, 180                    # 30-min trailing vol window (research trailing_vol)
     if args.test:                                    # lowered thresholds to see the path fire quickly
         cfg["detection"].update(reach_floor_bps=4, reach_pctile=90, reach_min_count=40, reach_refresh=20)
@@ -74,7 +76,7 @@ async def main():
              f"| DEEP {'on' if cfg['deep']['enabled'] else 'OFF'} "
              f"(floor {cfg['deep']['reach_floor_bps']}bps, vol<={cfg['deep']['vol_ceiling_bps_min']}bps/min) "
              f"{'[TEST]' if args.test else ''}")
-    n_recon = 0
+    n_recon = 0; last_lag_log = 0.0
     async for kind, payload in feed.stream():
         now = time.time_ns()
         if kind == "connected":
@@ -85,6 +87,7 @@ async def main():
             ch = payload.get("channel")
             if ch == "l2Book":
                 coin, bids, asks, t = parse_l2(payload["data"])
+                market.note_lag(now, t)
                 market.update_l2(coin, bids, asks, t); rec.l2_snap(coin, bids, asks, t)
             elif ch == "trades":
                 for tr in payload["data"]:
@@ -92,6 +95,23 @@ async def main():
                     de = 1.0 if tr["side"] == "B" else -1.0; t = int(tr["time"]) * 1_000_000
                     strat.on_trade(coin, px, sz, de, t); execu.on_trade(coin, px, sz, de, t)
                     rec.trade(coin, px, sz, "buy" if de > 0 else "sell", t)
+        lag = market.feed_lag_ms(LAG_MINN)          # None until warm -> guard stays permissive
+        if lag is not None:
+            ok = lag <= MAX_LAG
+            if ok != execu.feed_ok:                  # log only on the transition, not every loop
+                if ok:
+                    log.warning(f"[feed] lag RECOVERED {lag:.0f}ms <= {MAX_LAG}ms -> entries resume")
+                else:
+                    log.error(f"[feed] LAG {lag:.0f}ms > {MAX_LAG}ms -> HALTING NEW ENTRIES "
+                              f"(open positions keep managing their exits)")
+                execu.feed_ok = ok
+            if lag < -100 and time.time() - last_lag_log > LAG_LOG_S:
+                log.error(f"[feed] median lag {lag:.0f}ms is NEGATIVE -> local clock is AHEAD of the "
+                          f"exchange. Fix NTP (sudo timedatectl set-ntp true); the guard is unreliable.")
+                last_lag_log = time.time()
+            elif time.time() - last_lag_log > LAG_LOG_S:
+                log.info(f"[feed] median lag {lag:.0f}ms (halt at {MAX_LAG}ms)")
+                last_lag_log = time.time()
         for sig in strat.poll(now):
             log.info(f"SIGNAL {sig.sleeve} {sig.coin} {'BUY' if sig.dir > 0 else 'SELL'} reach {sig.reach:.0f}bps "
                      f"breadth {sig.breadth} sw_span {sig.sw_span:.0f} vol {sig.vol:.1f}bps/min")
@@ -107,6 +127,8 @@ async def main():
 
     rec.maybe_flush(log)
     c = execu.summary()
+    fl = market.feed_lag_ms(1)
+    log.info(f"feed lag median {fl:.0f}ms" if fl is not None else "feed lag: no samples")
     log.info(f"DONE reconnects {n_recon} orders {strat.n_orders} burst-cands {strat.n_sweeps} "
              f"deep-cands {strat.n_deep} closed {len(c)} skipped-no-room {execu.n_skipped}")
     if len(c):

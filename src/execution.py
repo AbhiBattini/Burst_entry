@@ -47,6 +47,7 @@ class PaperExecution:
         self.positions, self.closed = [], []
         self.n_skipped = 0
         self.tradable = True
+        self.feed_ok = True                         # set False by the latency guard (run.py)
         # CAP / SIZE / MINQ / RESERVE are set by apply_capital() — derived from wallet equity (src/capital.py),
         # never hand-set. §AC.2: BURST may use the whole cap, DEEP only (cap - reserve); without the reserve
         # the overlay crowds out 58 of 140 BURST triggers, and BURST is the sleeve that earns body income in
@@ -71,6 +72,8 @@ class PaperExecution:
     def _size_for(self, sig, bk):
         """Depth-aware size, then clipped to the sleeve's remaining room. Returns 0.0 if not worth taking."""
         if not self.tradable:                       # equity below capital.min_equity_usd
+            return 0.0
+        if not self.feed_ok:                        # feed lag over guards.max_feed_lag_ms
             return 0.0
         if len([p for p in self.positions if p["status"] != "closed"]) >= self.MAXOPEN:
             return 0.0

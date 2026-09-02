@@ -230,5 +230,36 @@ check("resize propagates to execution + strategy", before == (500, 500, 50, 125,
       f"{before} -> {after}")
 check("book reports flat/not-flat for the resize gate", ex_s.is_flat() is True)
 
+# ── 6. feed-latency guard ───────────────────────────────────────────────────────────────────────────
+print("\n6. feed-latency halt (guards.max_feed_lag_ms)")
+cfg6, s6, m6, ex6 = mk(COINS, cap=10_000.0, size=10_000.0)
+MAXLAG = cfg6["guards"]["max_feed_lag_ms"]
+T0 = 1_000_000_000_000
+check("lag is None until warm (guard permissive)", m6.feed_lag_ms(50) is None)
+for _ in range(60):
+    m6.note_lag(T0, T0 - 20_000_000)                                   # 20ms lag
+check("healthy feed reports ~20ms", abs(m6.feed_lag_ms(50) - 20.0) < 1e-6, f"{m6.feed_lag_ms(50)}ms")
+
+m7 = MarketState(vol_grid_s=1, vol_win=8)
+for _ in range(60):
+    m7.note_lag(T0, T0 - 900_000_000)                                  # 900ms lag
+check("stale feed exceeds the threshold", m7.feed_lag_ms(50) > MAXLAG, f"{m7.feed_lag_ms(50):.0f}ms")
+
+# one huge outlier must NOT trip it (median, not mean)
+m8 = MarketState(vol_grid_s=1, vol_win=8)
+for _ in range(59):
+    m8.note_lag(T0, T0 - 20_000_000)
+m8.note_lag(T0, T0 - 60_000_000_000)                                   # a 60s GC-pause outlier
+check("single outlier does not trip the halt", m8.feed_lag_ms(50) <= MAXLAG, f"{m8.feed_lag_ms(50):.0f}ms")
+
+t6 = NS * 10_000
+book(m6, "AAA", t6); ex6._now = lambda: t6
+ex6.feed_ok = False
+ex6.on_signal(Sig("AAA", 1.0, "BURST"))
+check("halted feed refuses new entries", len(ex6.positions) == 0, f"{len(ex6.positions)} positions")
+ex6.feed_ok = True
+ex6.on_signal(Sig("AAA", 1.0, "BURST"))
+check("recovered feed resumes entries", len(ex6.positions) == 1, f"{len(ex6.positions)} positions")
+
 print(f"\n{'ALL PASS' if not FAILS else 'FAILURES: ' + ', '.join(FAILS)}")
 sys.exit(1 if FAILS else 0)
