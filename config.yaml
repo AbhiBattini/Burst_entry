@@ -1,51 +1,111 @@
-# Strategy A (Track 69) — live deployable spec. All tunables live here; code reads only from this file + seed.json.
-# Values are the RESEARCH-VALIDATED defaults (see notes §Z–§Z.13 / AGENTS.md). Change with care.
+# Strategy A (Track 69) — live deployable spec, 2026-08-28.
+# ONE BOOK, TWO SLEEVES on a shared gross cap: BURST-ENTRY (the core) + DEEP-FOLLOW (overlay).
+# All tunables live here; code reads only from this file + seed.json. Values are the RESEARCH-VALIDATED
+# defaults — see ../CLAUDE.md (CURRENT STATE) and ../notes.md §AB.3 / §AC.4 / §AC.5 / §AD / §AE / §AF / §AG.
+#
+# ── CAPITAL ──────────────────────────────────────────────────────────────────────────────────────────
+# Sizing is DERIVED from wallet equity by `capital:` below — you do not hand-edit dollar amounts.
+# Fund the wallet with $500 and it runs a $500 book; add $9,500 and at the next flat refresh it runs a
+# $10k book. See src/capital.py for the derivation and why it is deliberately NON-LINEAR (per-trade size
+# stops growing at $10k; capital beyond that buys more concurrent bets, not bigger ones — §AD).
 
 mode: paper                     # paper | live   (live = real orders; requires .env key + live_safety review)
 
-universe: [XRP, SUI, DOGE, LTC, SOL, TON, ADA, AVAX, LINK, BCH, HYPE, AAVE, CRV, INJ, MORPHO, XPL, PUMP]
+# 31 names = HL top-40 perps by 24h notional, minus names too new/thin for the June-2026 research windows.
+# SOURCE OF TRUTH = ../A_book/universe.json. §AE: 17 -> 31 tokens ~2.5x'd $/day AND ex-tail income, almost
+# entirely through BURST, because breadth is a CROSS-BOOK signal. BTC/ETH fire almost no trades of their own
+# (n=4-5, books too deep for the reach bar) but supply BREADTH for everyone else — a book can be worth
+# MONITORING without being worth TRADING, so do not prune the universe on per-token tradeability.
+universe: [AAVE, ADA, ARB, AVAX, BCH, BNB, BTC, CRV, DOGE, ENA, ETH, FARTCOIN, HYPE, INJ, kPEPE,
+           LINK, LTC, MORPHO, NEAR, ONDO, PUMP, SOL, SUI, TAO, TON, UNI, WLD, XMR, XPL, XRP, ZEC]
 
 endpoint:                       # in-region from the Tokyo box these resolve to HL's Tokyo infra
   ws:   wss://api.hyperliquid.xyz/ws
   rest: https://api.hyperliquid.xyz
 
-detection:                      # sweep = reach >= max(floor, trailing p99.8 of fresh reach per book)
-  reach_floor_bps: 30           # the cost floor (post-gate break-even ~10; 30 is the deployable trigger)
+detection:                      # sweep = ORDER reach >= max(floor, trailing p99.8 of fresh order reach)
+  agg_gap_ms: 100               # §AB.3: consecutive same-side prints within this gap are ONE aggressor ORDER.
+                                # Per-PRINT scoring threw 339,774 candidates for 776 real orders on HYPE.
+  reach_floor_bps: 30           # BURST floor (post-gate break-even ~10; 30 is the deployable trigger)
   reach_pctile: 99.8
-  reach_buf: 5000               # rolling fresh-reach buffer per book
+  reach_buf: 5000               # rolling fresh-reach buffer per book (now in ORDERS, not prints)
   reach_min_count: 400          # warm-up before the rolling p99.8 overrides the seed
-  reach_refresh: 200            # recompute p99.8 every N fresh trades (keeps the hot path cheap)
-  fresh_ms: 100                 # trade counts only if book age < this (kills stale-book artifacts + reconnect staleness)
+  reach_refresh: 200            # recompute p99.8 every N fresh orders (keeps the hot path cheap)
+  fresh_ms: 100                 # order counts only if book age at ORDER START < this (kills stale-book
+                                # artifacts + the seconds after a WS reconnect)
 
-breadth:                        # the common-factor gate
+breadth:                        # the common-factor gate (BURST only)
   window_s: 120                 # trailing window for "other books swept same dir"
-  min_k: 1                      # require >= this many (>=1 = the validated burst-entry trigger)
+  min_k: 1                      # §AE re-verified after the universe doubled: >=1 stays optimal, monotonically
+                                # ($/day 447.9 / 206.3 / 188.0 / 125.3 at k = 1/2/3/4). Do NOT raise it as a
+                                # cascade guard — breadth is ELEVATED in a cascade, so k>=3 tilts you TOWARD
+                                # cascade days and costs 58% of calm PnL (§AF).
 
-swspan:                         # cluster-depth gate
+swspan:                         # cluster-depth gate (BURST only)
   cluster_s: 0.4                # forward cluster window after the trigger (also the reaction budget)
   hist_len: 4000
   min_count: 30                 # warm-up before the rolling median overrides the seed
   refresh: 20
 
+capital:                        # THE ONE PLACE MONEY IS CONFIGURED. Everything else is derived from equity.
+  mode: auto                    # auto = read wallet equity (needs HL_ACCOUNT_ADDRESS; no private key needed,
+                                #        the query is read-only, so paper mode can size to the real wallet)
+                                # fixed = always use paper_equity_usd
+  paper_equity_usd: 500         # equity for paper/fixed mode, and the fallback if the wallet read fails
+  max_equity_usd: 25000         # HARD CEILING applied before anything is derived. A parse bug or an
+                                # accidental deposit cannot size the book past this. Raise it DELIBERATELY
+                                # when you actually fund more (e.g. to 25000 covers the planned $10k step).
+  min_equity_usd: 100           # below this the book refuses to enter rather than sending dust
+  refresh_s: 300                # re-read equity this often; a RESIZE is only applied while FLAT, so a cap
+                                # never moves underneath an open position
+  cap_frac: 1.0                 # gross cap = equity * this. 1.0 = at most 1x gross exposure.
+  per_trade_cap_usd: 10000      # §AD: per-trade size NEVER grows past this — raising it buys headline and no
+                                # underwritable income (net bps 9.8 -> 5.2 -> 2.2 at $10k -> $50k -> $250k).
+  nmax_max: 8                   # §AD ceiling on the burst dedup; reached around a $100k cap
+  min_trade_frac: 0.10          # min trade = clip(cap * this, hl_min_order_usd, 500)  -> 50 at $500, 500 at $10k
+  hl_min_order_usd: 10          # exchange minimum order notional — VERIFY for your account
+  daily_loss_frac: 0.05         # §AF 5% intraday loss cap
+
 burst:
-  cooldown_s: 120               # burst-entry dedup: 1 signal / direction / cooldown
+  cooldown_s: 120               # dedup window per direction
+                                # NB `nmax` (max entries / direction / cooldown) is DERIVED from capital:
+                                # floor(cap / per-trade size), clipped to [1, nmax_max]. §AD: nmax=1 was a
+                                # CAPITAL-RATIONING rule, not a property of the edge — it is correct while
+                                # the cap is one trade wide, and rises on its own once it isn't.
+
+deep:                           # DEEP-FOLLOW overlay — per-token deep sweeps, no breadth/sw_span gate
+  enabled: true
+  reach_floor_bps: 40           # §AC.5: LOWERING is uniformly worse (marginal trades net -1.2 bps AND
+                                # displace BURST); 35-50 is a plateau. Re-derive at a much larger cap.
+  k_vol: 2.5                    # ratio bar: reach >= k_vol * own trailing vol. INERT under the ceiling
+                                # (2.5*10 = 25 < 40) but kept — a RATIO bar does not switch off in a crisis.
+  vol_ceiling_bps_min: 10       # §AC.4: the load-bearing dial. Without it DEEP's ex-tail is ~0 in calm and
+                                # -$430/day in a cascade. MUST be ABSOLUTE — a per-token percentile version
+                                # FAILS in both regimes ("low vol" is an absolute state). This is also what
+                                # makes a market-wide vol circuit-breaker REDUNDANT (breaker ON == OFF).
 
 execution:
   reaction_s: 0.4               # entry latency budget (signal fires cluster_s after the trigger)
   hold_s: 120
   exitwin_s: 60                 # maker-improve exit resting window
-  size_usd: 10000               # per-position target; depth-aware sizing may shrink it
-  slip_budget_bps: 30           # depth-aware sizing: largest notional fillable within this of touch
+                                # gross_cap_usd / size_usd / min_trade_usd are DERIVED from `capital:` above.
+  burst_reserve_frac: 0.25      # fraction of the cap RESERVED for BURST: DEEP may only use
+                                # (cap * (1 - frac)). Without a reserve DEEP crowds out 58 of 140 BURST
+                                # triggers (§AC.2), and BURST is the sleeve with positive body income in
+                                # BOTH regimes.
+  slip_budget_bps: 30           # depth-aware sizing: largest notional fillable within this of touch. THE
+                                # primary cascade guard — automatic, no regime detection (throttled fill to
+                                # ~$20k in the Oct-10 cascade vs ~$101k calm, §AF).
   stop_bps: 100                 # path stop
   maker_improve_ticks: 1        # post the exit this many ticks inside the touch
-  max_open: 5                   # per-burst gross cap (max concurrent open positions)
+  max_open: 5                   # secondary hard cap on concurrent positions (the gross cap is primary)
 
-fees:                           # ASSUMED HL fees for paper PnL; live uses actual fills
-  taker_bps: 4.5
+fees:                           # ASSUMED HL fees for paper PnL; live uses actual fills. A $500-$10k book is
+  taker_bps: 4.5                # base tier — rebates are unreachable at this volume ([[hl-maker-fee-...]]).
   maker_bps: 1.44
 
 clock:
-  restrict_utc_hours: []        # [] = trade all hours; e.g. [14,15,16,17] to trade only the US session (edge concentrates there)
+  restrict_utc_hours: []        # [] = trade all hours; e.g. [14,15,16,17] to trade only the US session
 
 recorder:
   enabled: true
@@ -53,10 +113,12 @@ recorder:
   flush_s: 600
 
 live_safety:                    # only consulted in mode: live
-  dry_run: true                 # true = LOG the order it would place, do NOT send. Flip to false only after verifying.
-  max_notional_usd: 10000       # hard cap per order
-  daily_loss_stop_usd: 500      # halt new entries after this realized loss in a UTC day (fed by realized closes)
+  dry_run: true                 # true = LOG the order it would place, do NOT send. Flip only after verifying.
+                                # max_notional_usd and daily_loss_stop_usd are DERIVED from `capital:` above
+                                # (per-trade size, and 5% of equity — the §AF intraday cap, which never
+                                # tripped in-sample: worst research day -$87 on a $100k book. Untested
+                                # insurance, not a proven guard).
   killswitch_file: ./KILL       # if this file exists, no new entries (touch KILL to stop instantly)
   fill_poll_ms: 500             # live only: throttle for resting maker-exit fill queries (query_order_by_oid)
   reconcile_on_start: true      # live only: on boot, handle any orphaned position/order (process died mid-trade)
-  reconcile_mode: flatten       # flatten = cancel stray orders + market-close stale positions | report = log only, don't send
+  reconcile_mode: flatten       # flatten = cancel stray orders + market-close stale positions | report = log only

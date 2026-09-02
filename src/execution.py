@@ -40,26 +40,67 @@ class PaperExecution:
     def __init__(self, cfg, market, log):
         e, f = cfg["execution"], cfg["fees"]
         self.m, self.log = market, log
-        self.HOLD, self.EXW, self.SIZE = e["hold_s"], e["exitwin_s"], e["size_usd"]
+        self.HOLD, self.EXW = e["hold_s"], e["exitwin_s"]
         self.SLIP, self.STOP, self.TICKS, self.MAXOPEN = e["slip_budget_bps"], e["stop_bps"], e["maker_improve_ticks"], e["max_open"]
+        self.RESERVE_FRAC = e["burst_reserve_frac"]
         self.TAKER, self.MAKER = f["taker_bps"], f["maker_bps"]
         self.positions, self.closed = [], []
+        self.n_skipped = 0
+        self.tradable = True
+        # CAP / SIZE / MINQ / RESERVE are set by apply_capital() — derived from wallet equity (src/capital.py),
+        # never hand-set. §AC.2: BURST may use the whole cap, DEEP only (cap - reserve); without the reserve
+        # the overlay crowds out 58 of 140 BURST triggers, and BURST is the sleeve that earns body income in
+        # BOTH regimes. MINQ is the "don't bother" floor when remaining room is a sliver.
+        self.CAP = self.SIZE = self.MINQ = self.RESERVE = 0.0
+
+    def apply_capital(self, p):
+        """Adopt a sizing set from CapitalManager. Called on boot and on each (flat-only) resize."""
+        self.CAP = p["gross_cap_usd"]; self.SIZE = p["size_usd"]; self.MINQ = p["min_trade_usd"]
+        self.RESERVE = self.RESERVE_FRAC * self.CAP
+        self.tradable = p["tradable"]
+
+    def is_flat(self):
+        return not any(p["status"] != "closed" for p in self.positions)
+
+    # --- capital rationing (§AC.2) ---------------------------------------
+    def room_for(self, sleeve):
+        """Remaining gross $ this sleeve may commit. BURST: the whole cap. DEEP: cap - reserve."""
+        gross = sum(p["size"] for p in self.positions if p["status"] != "closed")
+        return max(self.CAP if sleeve == "BURST" else self.CAP - self.RESERVE, 0.0) - gross
+
+    def _size_for(self, sig, bk):
+        """Depth-aware size, then clipped to the sleeve's remaining room. Returns 0.0 if not worth taking."""
+        if not self.tradable:                       # equity below capital.min_equity_usd
+            return 0.0
+        if len([p for p in self.positions if p["status"] != "closed"]) >= self.MAXOPEN:
+            return 0.0
+        room = self.room_for(sig.sleeve)
+        if room < self.MINQ:
+            self.n_skipped += 1
+            self.log.info(f"[SKIP ] {sig.coin} {sig.sleeve} no room (${room:,.0f} < ${self.MINQ:,.0f})")
+            return 0.0
+        buy = sig.dir > 0
+        levels = bk["asks"] if buy else bk["bids"]; touch = bk["ask"] if buy else bk["bid"]
+        size = min(size_within_budget(levels, touch, buy, self.SLIP, self.SIZE), room)
+        return size if size >= self.MINQ else 0.0
 
     # --- lifecycle -------------------------------------------------------
     def on_signal(self, sig):
         bk = self.m.book.get(sig.coin)
-        if bk is None or len([p for p in self.positions if p["status"] != "closed"]) >= self.MAXOPEN:
+        if bk is None:
+            return
+        size = self._size_for(sig, bk)
+        if size <= 0:
             return
         buy = sig.dir > 0
-        levels = bk["asks"] if buy else bk["bids"]; touch = bk["ask"] if buy else bk["bid"]
-        size = max(size_within_budget(levels, touch, buy, self.SLIP, self.SIZE), 1.0)
-        pin = walk(levels, size)
+        pin = walk(bk["asks"] if buy else bk["bids"], size)
         if not np.isfinite(pin) or pin <= 0:
             return
         self.positions.append(dict(coin=sig.coin, dir=sig.dir, entry_ts=self._now(), entry_px=pin, size=size,
-                                   status="open", breadth=sig.breadth, sw_span=sig.sw_span,
+                                   status="open", breadth=sig.breadth, sw_span=sig.sw_span, sleeve=sig.sleeve,
                                    exit_level=None, q_ahead=0.0, q_you=0.0, cum=0.0, exit_start=0))
-        self.log.info(f"[OPEN ] {sig.coin} {'LONG' if buy else 'SHORT'} @ {pin:.6g} ${size:,.0f} breadth {sig.breadth}")
+        self.log.info(f"[OPEN ] {sig.sleeve} {sig.coin} {'LONG' if buy else 'SHORT'} @ {pin:.6g} "
+                      f"${size:,.0f} breadth {sig.breadth} reach {sig.reach:.0f}bps")
 
     def on_trade(self, coin, px, sz, de, t_ns):
         for pos in self.positions:                              # accumulate maker-exit fill volume
@@ -97,10 +138,12 @@ class PaperExecution:
         de = pos["dir"]; fee = self.TAKER + (self.MAKER if kind == "maker" else self.TAKER)
         net = de * (exit_px - pos["entry_px"]) / pos["entry_px"] * 1e4 - fee
         pos["status"] = "closed"
-        self.closed.append(dict(coin=pos["coin"], dir=de, entry_ts=pos["entry_ts"], entry_px=pos["entry_px"],
+        self.closed.append(dict(coin=pos["coin"], sleeve=pos.get("sleeve", "BURST"), dir=de,
+                                entry_ts=pos["entry_ts"], entry_px=pos["entry_px"],
                                 size=pos["size"], exit_px=exit_px, kind=kind, net_bps=net, usd=net * pos["size"] / 1e4,
                                 breadth=pos["breadth"], sw_span=pos["sw_span"]))
-        self.log.info(f"[CLOSE] {pos['coin']} {kind} net {net:+.1f}bps ${net * pos['size'] / 1e4:+.2f}")
+        self.log.info(f"[CLOSE] {pos.get('sleeve','BURST')} {pos['coin']} {kind} "
+                      f"net {net:+.1f}bps ${net * pos['size'] / 1e4:+.2f}")
 
     def _now(self):
         import time
@@ -133,8 +176,9 @@ class LiveExecution(PaperExecution):
     def __init__(self, cfg, market, log):
         super().__init__(cfg, market, log)
         ls = cfg["live_safety"]
-        self.dry = ls["dry_run"]; self.max_notional = ls["max_notional_usd"]
-        self.daily_loss_stop = ls["daily_loss_stop_usd"]; self.kill = cfg["_root"] / ls["killswitch_file"]
+        self.dry = ls["dry_run"]; self.kill = cfg["_root"] / ls["killswitch_file"]
+        # max_notional / daily_loss_stop are DERIVED from wallet equity via apply_capital().
+        self.max_notional = self.daily_loss_stop = 0.0
         self.fill_poll_ms = ls.get("fill_poll_ms", 500)        # throttle for live user_state/order queries
         self.reconcile_start = ls.get("reconcile_on_start", True)   # flatten stale positions/orders on boot
         self.reconcile_mode = ls.get("reconcile_mode", "flatten")  # flatten | report
@@ -151,8 +195,15 @@ class LiveExecution(PaperExecution):
             self.info = Info(self.base_url, skip_ws=True)
             if not self.addr:
                 self.addr = acct.address                        # trade FOR the signer if no master given
-        log.warning(f"LiveExecution dry_run={self.dry} max_notional=${self.max_notional} "
-                    f"daily_loss_stop=${self.daily_loss_stop} killswitch={self.kill.name}")
+        log.warning(f"LiveExecution dry_run={self.dry} killswitch={self.kill.name} "
+                    f"(sizing + rails derived from wallet equity; see [capital] lines)")
+
+    def apply_capital(self, p):
+        """Base sizing plus the live rails, so both track equity together — a $500 book must not keep a
+        $10k per-order cap or a $500 daily stop."""
+        super().apply_capital(p)
+        self.max_notional = p["max_notional_usd"]
+        self.daily_loss_stop = p["daily_loss_stop_usd"]
 
     # --- risk gate -------------------------------------------------------
     def _blocked(self):
@@ -182,7 +233,7 @@ class LiveExecution(PaperExecution):
             self.log.info("[reconcile] dry_run: no live account queries -> skipping")
             return
         uni = set(self.universe); flatten = self.reconcile_mode == "flatten"
-        self.log.warning(f"[reconcile] scanning account {self.addr[:10]}… mode={self.reconcile_mode} universe={len(uni)}")
+        self.log.warning(f"[reconcile] scanning account {self.addr[:10]}... mode={self.reconcile_mode} universe={len(uni)}")
         try:
             oo = self.info.open_orders(self.addr) or []              # ⚠ verify: open_orders(addr) -> [{coin,oid,...}]
         except Exception as e:
@@ -222,20 +273,23 @@ class LiveExecution(PaperExecution):
         if self._blocked():
             return
         bk = self.m.book.get(sig.coin)
-        if bk is None or len([p for p in self.positions if p["status"] != "closed"]) >= self.MAXOPEN:
+        if bk is None:
             return
         buy = sig.dir > 0
-        levels = bk["asks"] if buy else bk["bids"]; touch = bk["ask"] if buy else bk["bid"]
-        size = min(max(size_within_budget(levels, touch, buy, self.SLIP, self.SIZE), 1.0), self.max_notional)
+        touch = bk["ask"] if buy else bk["bid"]
+        size = min(self._size_for(sig, bk), self.max_notional)     # depth-aware + sleeve room, then hard cap
+        if size < self.MINQ:
+            return
         coin_sz = round(size / touch, 6)
         fill_px = self._live_taker(sig.coin, buy, coin_sz, size, touch)     # entry send (dry logs, returns modeled)
         if not np.isfinite(fill_px) or fill_px <= 0:
             self.log.error(f"[entry ABORT] {sig.coin} no valid fill px -> not tracking a phantom position"); return
         self.positions.append(dict(coin=sig.coin, dir=sig.dir, entry_ts=self._now(), entry_px=fill_px, size=size,
-                                   status="open", breadth=sig.breadth, sw_span=sig.sw_span,
+                                   status="open", breadth=sig.breadth, sw_span=sig.sw_span, sleeve=sig.sleeve,
                                    exit_level=None, q_ahead=0.0, q_you=0.0, cum=0.0, exit_start=0,
                                    exit_oid=None, last_poll=0))
-        self.log.info(f"[OPEN ] {sig.coin} {'LONG' if buy else 'SHORT'} @ {fill_px:.6g} ${size:,.0f} breadth {sig.breadth}")
+        self.log.info(f"[OPEN ] {sig.sleeve} {sig.coin} {'LONG' if buy else 'SHORT'} @ {fill_px:.6g} "
+                      f"${size:,.0f} breadth {sig.breadth} reach {sig.reach:.0f}bps")
 
     # --- lifecycle (full reimpl so live code is what dry_run exercises) --
     def poll(self, now_ns):
