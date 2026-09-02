@@ -5,8 +5,8 @@
 #
 # ── CAPITAL ──────────────────────────────────────────────────────────────────────────────────────────
 # Sizing is DERIVED from wallet equity by `capital:` below — you do not hand-edit dollar amounts.
-# Fund the wallet with $500 and it runs a $500 book; add $9,500 and at the next flat refresh it runs a
-# $10k book. See src/capital.py for the derivation and why it is deliberately NON-LINEAR (per-trade size
+# Fund the wallet with $1,500 and it runs a $1,500 book; add more and at the next flat refresh it
+# resizes itself. See src/capital.py for the derivation and why it is deliberately NON-LINEAR (per-trade size
 # stops growing at $10k; capital beyond that buys more concurrent bets, not bigger ones — §AD).
 
 mode: paper                     # paper | live   (live = real orders; requires .env key + live_safety review)
@@ -51,7 +51,7 @@ capital:                        # THE ONE PLACE MONEY IS CONFIGURED. Everything 
   mode: auto                    # auto = read wallet equity (needs HL_ACCOUNT_ADDRESS; no private key needed,
                                 #        the query is read-only, so paper mode can size to the real wallet)
                                 # fixed = always use paper_equity_usd
-  paper_equity_usd: 500         # equity for paper/fixed mode, and the fallback if the wallet read fails
+  paper_equity_usd: 1500        # equity for paper/fixed mode, and the fallback if the wallet read fails
   max_equity_usd: 25000         # HARD CEILING applied before anything is derived. A parse bug or an
                                 # accidental deposit cannot size the book past this. Raise it DELIBERATELY
                                 # when you actually fund more (e.g. to 25000 covers the planned $10k step).
