@@ -15,7 +15,8 @@ books fire, the next comes in ~7 s, ~90 % same direction).
 ## Architecture (data flow)
 ```
 HLFeed.stream()  --msg-->  run.main loop
-   l2Book  -> MarketState.update_l2   (book + tick + 10s-grid vol per coin)   + Recorder.l2_snap
+   bbo     -> MarketState.update_bbo  (THE TOUCH: bid/ask/mid/ts + top sizes + 10s vol grid)
+   l2Book  -> MarketState.update_l2   (DEPTH ONLY: ladder + tick)              + Recorder.l2_snap
    trades  -> StrategyA.on_trade      (aggregate prints -> ORDER)             + Paper/LiveExecution.on_trade
                                                                               + Recorder.trade
    every loop: StrategyA.poll(now) -> [Signal(sleeve=BURST|DEEP)] -> Execution.on_signal   (open position)
@@ -42,6 +43,7 @@ HLFeed.stream()  --msg-->  run.main loop
 ## How the code maps to the research (so you don't re-derive)
 | config / code | research | note |
 |---|---|---|
+| `bbo` = touch, `l2Book` = depth | §AH.2 | HL's public `l2Book` publishes on a fixed ~5.4s cycle (0.19/s for EVERY coin); `bbo` is event-driven at ~2-10/s. Reading the TOUCH off `l2Book` gave a median book age of 1,761ms and failed 75% of orders on `fresh_ms` -- and worse, reach measured against a stale touch MANUFACTURES fake deep sweeps (the artifact §Data warns about, and §W.1 measured on Binance at 97%). `MarketState._touch()` takes whichever source is NEWER so a late `l2Book` cannot re-stale a fresh touch. Sizing tolerates a stale ladder; reach does not. |
 | `detection.agg_gap_ms: 100` | §AB.3 | prints -> ORDERS. Per-print scoring threw 339,774 candidates for 776 real orders on HYPE (fill fragmentation, $17 median print). The biggest fidelity bug this repo ever had. |
 | `detection.reach_floor_bps: 30` | §Z.1, LIVE-ENG #1 | post-gate break-even ≈10; 30 is the deployable trigger. The floor is load-bearing; a pure percentile fails OOS. |
 | `detection.reach_pctile: 99.8` + seed | §L, §AB.3 | tight books floor at 30, wide books adaptive (seed.json, now on ORDER reach). |
@@ -60,6 +62,10 @@ HLFeed.stream()  --msg-->  run.main loop
 1. **Causal only.** Every threshold uses trailing or seeded data. If you add a feature it must be computable live.
 2. **Fresh-book filter.** `fresh_ms` is applied at ORDER START and guards against stale books, including the
    seconds after a reconnect. Keep it.
+2b. **The touch comes from `bbo`, never from `l2Book` alone.** `l2Book` is a ~5.4s periodic snapshot; using it
+   as the touch silently degrades the SIGNAL (fake sweeps), not just the rate. If you add a venue or channel,
+   measure the cadence of the specific field the signal reads -- `tools/feed_doctor.py` prints the
+   l2Book-only counterfactual next to the live number precisely so this regression is visible.
 3. **Aggregate prints into orders before any percentile.** A per-print bar is a different filter on every tape
    (§AB.3, and [[threshold-units-mis-scale]]). Normalise the event unit first.
 4. **Hot path stays cheap.** Per-trade work is a dict lookup plus one comparison; percentile/median recompute is

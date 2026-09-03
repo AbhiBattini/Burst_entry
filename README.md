@@ -24,13 +24,16 @@ quality, and what "normal" looks like.
 | **BURST-ENTRY** (core) | order `reach ≥ max(30 bps, trailing p99.8)` | ≥1 other book swept same dir in prior 120 s **AND** `sw_span ≥` trailing median; dedup `nmax`/dir/120 s | may use the whole cap |
 | **DEEP-FOLLOW** (overlay) | order `reach ≥ max(2.5 × own vol, 40 bps, trailing p99.8)` | none — but own trailing vol **≤ 10 bps/min** | capped at `cap × (1 − reserve)` |
 
+- **Feed:** the touch comes from HL's **`bbo`** channel (~10 msg/s/coin, 78 ms gaps); **`l2Book` is depth only**
+  (~0.2/s, 5.4 s gaps). Reach is penetration past the touch, so a stale touch manufactures fake sweeps —
+  measuring it off `l2Book` put the median book age at 1,761 ms and failed 75 % of orders on freshness.
 - **Detector:** consecutive same-side prints within 100 ms are ONE aggressor **order**; reach is measured against
   the touch at order start. Both sleeves are non-overlapping per token over the position lifetime (~120 s).
   Where both qualify on the same order, BURST wins.
 - **Execution:** taker entry ~0.4 s after the trigger, depth-aware size (largest notional filling within 30 bps of
   touch), 120 s hold, 100 bps path stop, maker post-only exit one tick inside the touch (60 s window, taker
   fallback).
-- **Feed-health halt:** new entries stop while the rolling median l2Book lag exceeds `guards.max_feed_lag_ms`
+- **Feed-health halt:** new entries stop while the rolling median touch lag exceeds `guards.max_feed_lag_ms`
   (1000 ms). Open positions keep managing their own exits, and entries resume on their own when lag recovers.
   **Measured in-region baseline is ~285–310 ms** — that is HL's own publish/consensus floor, not your network
   (connect RTT ~1.7 ms), so the halt is a fault threshold at ~3x baseline, not a budget check.

@@ -73,7 +73,7 @@ journalctl -u strat-a -p warning --since "6 hours ago"
 | Line | Meaning |
 |---|---|
 | `[capital]` | equity read and the sizing derived from it; also logs any resize |
-| `[feed]` | rolling median l2Book lag, once a minute |
+| `[feed]` | rolling median TOUCH lag (from `bbo`), once a minute; also names any book with a stale touch |
 | `SIGNAL` | a gated signal fired (BURST or DEEP) |
 | `[OPEN ]` | position opened (paper) |
 | `[CLOSE]` | position closed — carries `maker`/`taker`/`stop` and net bps |
