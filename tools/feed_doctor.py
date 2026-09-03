@@ -45,7 +45,8 @@ async def main():
     l2n = defaultdict(int); bbn = defaultdict(int); trn = defaultdict(int)
     last_l2_ts = {}                       # coin -> exchange ts of last TOUCH (bbo, else l2Book)
     last_only_l2 = {}                     # coin -> exchange ts of last l2Book, for the counterfactual
-    gaps = defaultdict(list)              # coin -> l2 inter-arrival ms
+    gaps = defaultdict(list)              # coin -> touch inter-arrival ms
+    blag = defaultdict(list)              # coin -> per-book feed lag ms (exchange stamp -> our receipt)
     stale = defaultdict(list)             # coin -> trade-vs-book age ms (per ORDER, not per print)
     agg = {}                              # coin -> in-flight order (mirrors strategy.py aggregation)
     stale_l2 = []                         # counterfactual: age if we only had l2Book
@@ -63,6 +64,7 @@ async def main():
         if ch == "bbo":
             d = payload["data"]; coin = d["coin"]; t = int(d["time"]) * 1_000_000
             bbn[coin] += 1
+            blag[coin].append((time.time_ns() - t) / 1e6)
             if coin in last_l2_ts:
                 gaps[coin].append((t - last_l2_ts[coin]) / 1e6)
             last_l2_ts[coin] = max(t, last_l2_ts.get(coin, -1))
@@ -133,6 +135,30 @@ async def main():
         fr = 100 * np.mean(st < FRESH) if stale[c] else float("nan")
         print(f"{c:>9}{bbn[c]/DUR:>8.2f}{l2n[c]/DUR:>8.2f}{np.nanmedian(g):>9.0f}{np.nanpercentile(g,90):>9.0f}"
               f"{trn[c]:>8}{np.nanmedian(st):>11.0f}{fr:>8.0f}")
+
+    # ── 4. is latency EVEN across books, or do some stand out? ────────────────────────────────────
+    print(f"\n=== 4. CROSS-BOOK DISPERSION ===")
+    lag_med = {c: float(np.median(v)) for c, v in blag.items() if len(v) >= 20}
+    rate = {c: bbn[c] / DUR for c in lag_med}
+    if lag_med:
+        L = np.array(list(lag_med.values()))
+        print(f"per-book FEED LAG (exchange stamp -> our receipt), {len(L)} books:")
+        print(f"  median {np.median(L):.0f}ms | IQR {np.percentile(L,25):.0f}-{np.percentile(L,75):.0f}ms | "
+              f"min {L.min():.0f} | max {L.max():.0f} | spread {L.max()-L.min():.0f}ms")
+        print("  slowest: " + ", ".join(f"{c} {v:.0f}ms" for c, v in
+                                        sorted(lag_med.items(), key=lambda kv: -kv[1])[:3]))
+        print("  -> ONE socket, so a WIDE spread would mean per-symbol publishing differences; a TIGHT")
+        print("     spread means lag is a venue-wide constant you cannot tune away.")
+        R = np.array(list(rate.values()))
+        print(f"\nper-book UPDATE RATE, {len(R)} books:")
+        print(f"  median {np.median(R):.2f}/s | IQR {np.percentile(R,25):.2f}-{np.percentile(R,75):.2f}/s | "
+              f"min {R.min():.2f} | max {R.max():.2f} | max/median {R.max()/max(np.median(R),1e-9):.1f}x")
+        print("  fastest: " + ", ".join(f"{c} {v:.1f}/s" for c, v in
+                                        sorted(rate.items(), key=lambda kv: -kv[1])[:3]))
+        print("  slowest: " + ", ".join(f"{c} {v:.1f}/s" for c, v in
+                                        sorted(rate.items(), key=lambda kv: kv[1])[:3]))
+        print("  -> RATE is ACTIVITY, not latency. Right-skew is expected and fine for breadth (a quiet")
+        print("     book simply rarely qualifies), but it does mean breadth leans on the fast tail.")
 
     print("\nNOTE: a low fresh% with a healthy l2/s means the FILTER is the constraint, not the market.")
     print("A low l2/s (or a missing coin) means the FEED is the constraint. They need different fixes.")
