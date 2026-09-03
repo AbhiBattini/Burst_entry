@@ -196,7 +196,13 @@ class PaperExecution:
                 lvl = (bk["ask"] - tk) if (buy and tk and bk["ask"] - tk > bk["bid"]) else \
                       (bk["bid"] + tk) if ((not buy) and tk and bk["bid"] + tk < bk["ask"]) else \
                       (bk["ask"] if buy else bk["bid"])
-                pos.update(exit_level=lvl, q_ahead=(bk.get("ask_sz") if buy else bk.get("bid_sz")) or 0.0,
+                touch = bk["ask"] if buy else bk["bid"]
+                # If we IMPROVED on the touch we are alone at that price -> nothing is ahead of us. Charging
+                # the touch queue here made the paper sim pessimistic exactly when the improve works, which
+                # is the case the maker-share number is meant to measure.
+                improved = (lvl < touch) if buy else (lvl > touch)
+                pos.update(exit_level=lvl,
+                           q_ahead=0.0 if improved else ((bk.get("ask_sz") if buy else bk.get("bid_sz")) or 0.0),
                            q_you=pos["size"] / lvl, status="exiting", exit_start=now_ns)
             elif pos["status"] == "exiting":
                 if pos["cum"] >= pos["q_ahead"] + pos["q_you"]:                         # fully filled maker
@@ -397,7 +403,10 @@ class LiveExecution(PaperExecution):
                 lvl = (bk["ask"] - tk) if (buy and tk and bk["ask"] - tk > bk["bid"]) else \
                       (bk["bid"] + tk) if ((not buy) and tk and bk["bid"] + tk < bk["ask"]) else \
                       (bk["ask"] if buy else bk["bid"])
-                pos.update(exit_level=lvl, q_ahead=(bk.get("ask_sz") if buy else bk.get("bid_sz")) or 0.0,
+                touch = bk["ask"] if buy else bk["bid"]
+                improved = (lvl < touch) if buy else (lvl > touch)      # alone at our price -> no queue ahead
+                pos.update(exit_level=lvl,
+                           q_ahead=0.0 if improved else ((bk.get("ask_sz") if buy else bk.get("bid_sz")) or 0.0),
                            q_you=pos["size"] / lvl, status="exiting", exit_start=now_ns, cum=0.0, last_poll=0)
                 pos["exit_oid"] = self._live_post_exit(pos, lvl)
             # (3) exiting -> query real fill; TAKER-fallback for the remainder at window end
