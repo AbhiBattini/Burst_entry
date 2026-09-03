@@ -187,6 +187,26 @@ full day or more; hour-to-hour counts are Poisson noise at n≈1.
   fast feed. Fix with `sudo timedatectl set-ntp true`. The lag guard is unreliable until you do.
 - **~300 ms feed lag** — that is HL's own publish/consensus floor (HyperBFT ~200 ms), not your network.
   Verify with the RTT check below; ~1–15 ms connect means the network is fine.
+- **`STALE touch` naming a book or two in the `[feed]` line** — normal in small numbers. A book only needs to
+  go a couple of seconds without a quote change to appear. It matters when the SAME book is named
+  persistently: that book is contributing no candidates and no breadth.
+- **`TON` missing entirely (2026-09-03)** — HL accepts the `bbo` subscription for TON and never publishes on
+  it, and its `l2Book` is intermittent too; observed windows with 30/31 books held. This is a VENUE gap, not
+  a subscription problem (all 93 subscribe-acks return, and there is no throttling — see below). It degrades
+  SAFELY: with no fresh touch, TON's orders fail `fresh_ms`, so it yields no candidates and no breadth, and
+  `on_signal` returns early when there is no book at all. Left in the universe because `A_book/universe.json`
+  is the research source of truth; remove it only deliberately.
+
+### Is HL throttling us?
+
+```bash
+cd ~/Burst_entry && .venv/bin/python tools/throttle_check.py 90
+```
+
+Measures per-coin `bbo` rate on `bbo` alone vs the full 3-channel subscription (93 subs at 31 coins). If the
+full arm is materially slower, the touch stream is being degraded and channels should be split across
+sockets. **Measured 2026-09-03: 4.48/s alone vs 4.76/s full = 106% — no throttling, the full subscription is
+free.**
 
 ---
 

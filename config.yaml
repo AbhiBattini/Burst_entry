@@ -120,6 +120,11 @@ guards:                         # feed-health halt. Independent of the killswitc
                                 # fill reconciliation. Open positions keep managing their own exits.
   lag_min_samples: 50           # warm-up before the guard can trip (median over the last 200 messages)
   lag_log_s: 60                 # how often to log feed health while healthy
+  stale_touch_ms: 2000          # report books whose TOUCH is older than this in the periodic feed line.
+                                # Such a book is effectively OUT of the strategy -- its orders fail
+                                # fresh_ms, so it yields no candidates and no breadth. Usual cause: the
+                                # venue publishes no `bbo` for that symbol, leaving only the ~5.4s l2Book
+                                # (observed on TON, 2026-09-03). Diagnostic only; changes no behaviour.
 
 fees:                           # ASSUMED HL fees for paper PnL; live uses actual fills. A $500-$10k book is
   taker_bps: 4.5                # base tier — rebates are unreachable at this volume ([[hl-maker-fee-...]]).

@@ -97,6 +97,22 @@ class MarketState:
             return None
         return float(np.median(np.asarray(self._lag)))
 
+    def stale_books(self, max_age_ms):
+        """Books whose TOUCH lags the FRESHEST book we hold, by more than max_age_ms.
+
+        Measured against the newest EXCHANGE timestamp across all books, NOT against local time: this box's
+        clock may be skewed (see feed_lag_ms), and a skewed clock must not silently break the very check that
+        tells you which books are dead.
+
+        A book listed here is effectively OUT of the strategy -- its orders fail the fresh_ms filter, so it
+        yields no candidates and contributes nothing to breadth. Usual cause: the venue publishes no `bbo`
+        for that symbol, leaving only the ~5.4s l2Book (observed on TON, 2026-09-03)."""
+        if not self.book:
+            return []
+        newest = max(bk.get("t", 0) for bk in self.book.values())
+        return sorted(c for c, bk in self.book.items()
+                      if (newest - bk.get("t", 0)) / 1e6 > max_age_ms)
+
     def add_trade(self, coin, px, de, t_ns):
         self.trades[coin].append((t_ns, px, de))
 

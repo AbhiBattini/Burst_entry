@@ -48,6 +48,7 @@ async def main():
     log = setup_log(cfg["_root"])
     gd = cfg["guards"]
     MAX_LAG, LAG_MINN, LAG_LOG_S = gd["max_feed_lag_ms"], gd["lag_min_samples"], gd["lag_log_s"]
+    STALE_MS = gd.get("stale_touch_ms", 2000)   # a book above this is effectively out of the book
     vol_grid_s, vol_win = 10, 180                    # 30-min trailing vol window (research trailing_vol)
     if args.test:                                    # lowered thresholds to see the path fire quickly
         cfg["detection"].update(reach_floor_bps=4, reach_pctile=90, reach_min_count=40, reach_refresh=20)
@@ -111,12 +112,21 @@ async def main():
                     log.error(f"[feed] LAG {lag:.0f}ms > {MAX_LAG}ms -> HALTING NEW ENTRIES "
                               f"(open positions keep managing their exits)")
                 execu.feed_ok = ok
-            if lag < -100 and time.time() - last_lag_log > LAG_LOG_S:
-                log.error(f"[feed] median lag {lag:.0f}ms is NEGATIVE -> local clock is AHEAD of the "
-                          f"exchange. Fix NTP (sudo timedatectl set-ntp true); the guard is unreliable.")
-                last_lag_log = time.time()
-            elif time.time() - last_lag_log > LAG_LOG_S:
-                log.info(f"[feed] median lag {lag:.0f}ms (halt at {MAX_LAG}ms)")
+            if time.time() - last_lag_log > LAG_LOG_S:
+                # The stale-book report must NOT hide behind the healthy-lag branch: a skewed clock is
+                # exactly when you still want to know which books are silently out of the strategy.
+                st = market.stale_books(STALE_MS)
+                tail = ""
+                if st:                                # these books are OUT: no candidates, no breadth
+                    tail = (f" | {len(st)} book(s) with a STALE touch (>{STALE_MS:.0f}ms): "
+                            f"{','.join(st[:6])}{'...' if len(st) > 6 else ''}")
+                if lag < -100:
+                    log.error(f"[feed] median lag {lag:.0f}ms is NEGATIVE -> local clock is BEHIND the "
+                              f"exchange (we stamp receipt EARLIER than HL stamps send). Fix NTP "
+                              f"(sudo timedatectl set-ntp true); the lag guard is unreliable "
+                              f"until you do.{tail}")
+                else:
+                    log.info(f"[feed] median lag {lag:.0f}ms (halt at {MAX_LAG}ms){tail}")
                 last_lag_log = time.time()
         for sig in strat.poll(now):
             log.info(f"SIGNAL {sig.sleeve} {sig.coin} {'BUY' if sig.dir > 0 else 'SELL'} reach {sig.reach:.0f}bps "
