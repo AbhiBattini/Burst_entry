@@ -251,7 +251,7 @@ Compare against these before concluding anything is wrong.
 | — BURST | ~0.9 / hour | 304 / 14 days |
 | — DEEP | **~1 per 9 hours** | 37 / 14 days |
 | Maker exit share | ~62% (backtest assumption) | §AD pool |
-| Feed lag median | **~285–310 ms** | measured in-region 2026-09-02 |
+| Feed lag median (touch) | **~228 ms**, cross-book spread ~15 ms | measured in-region on `bbo`, 2026-09-03. The older ~285-310 ms figure was measured on `l2Book` before the touch moved to `bbo` -- different basis, not a regression. |
 | bbo updates | ~9–10 /s /coin (~78 ms gap) | measured 2026-09-03 |
 | l2Book updates | ~0.2 /s /coin (~5.4 s gap) — depth only | measured 2026-09-03 |
 | Orders passing `fresh_ms` | **~99%** | with bbo as the touch |

@@ -54,6 +54,8 @@ async def main():
 
     feed = HLFeed(cfg["endpoint"]["ws"], uni)
     t_end = time.time() + DUR
+    t_connect_ns = time.time_ns()        # HL replays recent trades on connect; ignore anything older
+    n_replay = 0
     print(f"listening {DUR:.0f}s on {len(uni)} coins (fresh_ms={FRESH}, agg_gap_ms={AGG_NS/1e6:.0f})...")
     async for kind, payload in feed.stream():
         if time.time() > t_end:
@@ -77,6 +79,9 @@ async def main():
             for tr in payload["data"]:
                 coin = tr["coin"]; t = int(tr["time"]) * 1_000_000
                 de = 1.0 if tr["side"] == "B" else -1.0
+                if t < t_connect_ns:                 # replayed history, not live flow
+                    n_replay += 1
+                    continue
                 trn[coin] += 1
                 bk = last_l2_ts.get(coin)
                 if bk is None:
@@ -112,6 +117,8 @@ async def main():
     allst = np.concatenate([np.array(v) for v in stale.values()]) if stale else np.array([])
     if len(allst):
         pas = 100 * np.mean(allst < FRESH)
+        if n_replay:
+            print(f"(ignored {n_replay:,} trades replayed on connect with pre-connection stamps)")
         print(f"orders {n_orders:,} | book age at order start: median {np.median(allst):.0f}ms  "
               f"p90 {np.percentile(allst,90):.0f}ms")
         print(f"PASSING fresh_ms<{FRESH}: {pas:.1f}%  ({n_fresh:,} of {n_orders:,})")
