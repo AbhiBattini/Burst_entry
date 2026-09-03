@@ -254,6 +254,29 @@ Reports book coverage, the trade-vs-book staleness distribution, and per-coin ca
 **If fresh% is ~25% and book age median is ~1,700 ms, the touch is coming from `l2Book` instead of `bbo`** —
 that was the pre-2026-09-03 bug. HL's public `l2Book` arrives only every ~5.4 s; `bbo` arrives every ~78 ms.
 
+## 4c. Latency — what is worth buying, and what is not
+
+**Do not buy a faster feed for this strategy.** Entry is pinned to `trigger + swspan.cluster_s` (0.4 s), not
+to when you learn about the trigger, so reducing feed lag does **not** move your entry time.
+
+Where the time actually goes:
+
+```
+trigger  -> we learn      ~300 ms   HL's publish floor, not your network
+         -> we WAIT       to trigger+400 ms   (deliberate: the sw_span cluster gate)
+         -> send            ~2 ms   in-region
+         -> consensus     ~200 ms   fixed, HyperBFT
+   fill lands around trigger + 600-700 ms
+```
+
+At ~300 ms lag you already hold ~100 ms of slack against the 400 ms deadline. Paid options exist (dedicated
+HL nodes benchmark ~51 ms / ~24 % faster; vendors sell Tokyo-peered API access and gRPC market data) but that
+51 ms buys **margin** — jitter robustness and headroom under `guards.max_feed_lag_ms` — not edge. Treat a
+premium feed as an availability/SLA purchase, not a performance one.
+
+The one thing that would change this: if the drift buckets in §3 show a systematic cost. Even then the lever
+is the **cluster window** (a research question — it is what makes the gate work) rather than infrastructure.
+
 ## 5. Health checks
 
 Network round trip to HL (should be ~1–15 ms from Tokyo; 100 ms+ means the box is in the wrong region):
