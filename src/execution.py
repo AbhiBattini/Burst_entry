@@ -93,6 +93,8 @@ class PaperExecution:
             return 0.0
         buy = sig.dir > 0
         levels = bk["asks"] if buy else bk["bids"]; touch = bk["ask"] if buy else bk["bid"]
+        if not levels:                              # bbo arrived but no depth ladder yet (first ~5s)
+            return 0.0
         size = min(size_within_budget(levels, touch, buy, self.SLIP, self.SIZE), room)
         return size if size >= self.MINQ else 0.0
 
@@ -153,7 +155,7 @@ class PaperExecution:
                 lvl = (bk["ask"] - tk) if (buy and tk and bk["ask"] - tk > bk["bid"]) else \
                       (bk["bid"] + tk) if ((not buy) and tk and bk["bid"] + tk < bk["ask"]) else \
                       (bk["ask"] if buy else bk["bid"])
-                pos.update(exit_level=lvl, q_ahead=(bk["asks"][0][1] if buy else bk["bids"][0][1]),
+                pos.update(exit_level=lvl, q_ahead=(bk.get("ask_sz") if buy else bk.get("bid_sz")) or 0.0,
                            q_you=pos["size"] / lvl, status="exiting", exit_start=now_ns)
             elif pos["status"] == "exiting":
                 if pos["cum"] >= pos["q_ahead"] + pos["q_you"]:                         # fully filled maker
@@ -348,7 +350,7 @@ class LiveExecution(PaperExecution):
                 lvl = (bk["ask"] - tk) if (buy and tk and bk["ask"] - tk > bk["bid"]) else \
                       (bk["bid"] + tk) if ((not buy) and tk and bk["bid"] + tk < bk["ask"]) else \
                       (bk["ask"] if buy else bk["bid"])
-                pos.update(exit_level=lvl, q_ahead=(bk["asks"][0][1] if buy else bk["bids"][0][1]),
+                pos.update(exit_level=lvl, q_ahead=(bk.get("ask_sz") if buy else bk.get("bid_sz")) or 0.0,
                            q_you=pos["size"] / lvl, status="exiting", exit_start=now_ns, cum=0.0, last_poll=0)
                 pos["exit_oid"] = self._live_post_exit(pos, lvl)
             # (3) exiting -> query real fill; TAKER-fallback for the remainder at window end

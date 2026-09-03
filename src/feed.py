@@ -18,7 +18,7 @@ class HLFeed:
             try:
                 async with websockets.connect(self.url, ping_interval=20, max_queue=None) as ws:
                     for c in self.universe:
-                        for ty in ("l2Book", "trades"):
+                        for ty in ("bbo", "l2Book", "trades"):     # bbo = the FAST touch (~78ms); l2Book = depth (~5.4s)
                             await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": ty, "coin": c}}))
                     yield ("connected", None)
                     while not self._stop:

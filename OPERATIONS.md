@@ -168,6 +168,9 @@ Compare against these before concluding anything is wrong.
 | — DEEP | **~1 per 9 hours** | 37 / 14 days |
 | Maker exit share | ~62% (backtest assumption) | §AD pool |
 | Feed lag median | **~285–310 ms** | measured in-region 2026-09-02 |
+| bbo updates | ~9–10 /s /coin (~78 ms gap) | measured 2026-09-03 |
+| l2Book updates | ~0.2 /s /coin (~5.4 s gap) — depth only | measured 2026-09-03 |
+| Orders passing `fresh_ms` | **~99%** | with bbo as the touch |
 | Reconnects | rare; each leaves a ~3 s gap | — |
 | Recorder disk | ~400 MB/day | 31 books × ~2 L2 snaps/s |
 
@@ -186,6 +189,23 @@ full day or more; hour-to-hour counts are Poisson noise at n≈1.
   Verify with the RTT check below; ~1–15 ms connect means the network is fine.
 
 ---
+
+## 4b. Feed doctor — run this FIRST when the trade rate looks wrong
+
+```bash
+cd ~/Burst_entry && .venv/bin/python tools/feed_doctor.py 120
+```
+
+Reports book coverage, the trade-vs-book staleness distribution, and per-coin cadence. Read it as:
+
+- **low `fresh%` with healthy `bbo/s`** -> the FILTER is the constraint, not the market
+- **low `bbo/s`, or a coin missing entirely** -> the FEED is the constraint (a missing book contributes
+  nothing to breadth, and is invisible in the strategy log: it just looks like a quiet market)
+
+**Expected (measured 2026-09-03):** `bbo/s` ~9-10 per coin, `l2/s` ~0.2, fresh% ~99%+, book age median ~0 ms.
+
+**If fresh% is ~25% and book age median is ~1,700 ms, the touch is coming from `l2Book` instead of `bbo`** —
+that was the pre-2026-09-03 bug. HL's public `l2Book` arrives only every ~5.4 s; `bbo` arrives every ~78 ms.
 
 ## 5. Health checks
 

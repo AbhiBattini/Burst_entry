@@ -40,20 +40,40 @@ class MarketState:
         self._vr = defaultdict(lambda: deque(maxlen=vol_win))        # coin -> log returns on the grid
         self._lag = deque(maxlen=lag_buf)                            # ms from exchange stamp to our receipt
 
+    def _touch(self, coin, bid, ask, bid_sz, ask_sz, t_ns):
+        """Set the touch from whichever source is NEWER. HL's public l2Book arrives ~every 5.4s while bbo
+        arrives ~every 78ms, so a late l2Book must never overwrite a fresh bbo touch and re-stale the book."""
+        bk = self.book.get(coin)
+        if bk is None:
+            self.book[coin] = bk = dict(bids=[], asks=[], t_ladder=0)
+        if t_ns >= bk.get("t", -1):
+            mid = 0.5 * (bid + ask)
+            bk.update(bid=bid, ask=ask, mid=mid, t=t_ns, bid_sz=bid_sz, ask_sz=ask_sz)
+            b = t_ns // self.GRID                                    # 10s grid sample for trailing vol
+            if self._vt.get(coin) != b:
+                prev = self._vm.get(coin)
+                if prev and prev > 0 and self._vt.get(coin) is not None:
+                    self._vr[coin].append(float(np.log(mid / prev)))
+                self._vt[coin] = b; self._vm[coin] = mid
+
+    def update_bbo(self, coin, bid, bid_sz, ask, ask_sz, t_ns):
+        """THE TOUCH. Everything latency-critical -- reach, the fresh_ms filter, sw_span, the stop, the exit
+        level -- reads this. See tools/feed_doctor.py for why l2Book alone is not enough."""
+        self._touch(coin, bid, ask, bid_sz, ask_sz, t_ns)
+
     def update_l2(self, coin, bids, asks, t_ns):
+        """DEPTH only: the ladder for depth-aware sizing and entry/exit book-walks. Slow (~5.4s) and that is
+        fine -- sizing tolerates a stale ladder in a way that reach does not."""
         if not bids or not asks:
             return
-        mid = 0.5 * (bids[0][0] + asks[0][0])
-        self.book[coin] = dict(bid=bids[0][0], ask=asks[0][0], mid=mid, t=t_ns, bids=bids, asks=asks)
+        bk = self.book.get(coin)
+        if bk is None:
+            self.book[coin] = bk = dict(t=-1)
+        bk["bids"] = bids; bk["asks"] = asks; bk["t_ladder"] = t_ns
         da = np.diff([p for p, _ in asks[:6]]); da = da[da > 0]
         if len(da):
             self.tick[coin] = float(da.min())
-        b = t_ns // self.GRID                                        # 10s grid sample for trailing vol
-        if self._vt.get(coin) != b:
-            prev = self._vm.get(coin)
-            if prev and prev > 0 and self._vt.get(coin) is not None:
-                self._vr[coin].append(float(np.log(mid / prev)))
-            self._vt[coin] = b; self._vm[coin] = mid
+        self._touch(coin, bids[0][0], asks[0][0], bids[0][1], asks[0][1], t_ns)   # no-op if bbo is fresher
 
     def vol_bps_min(self, coin):
         """Trailing realised vol in bps/MINUTE: std of 10s log returns * sqrt(6) * 1e4 (research trailing_vol).

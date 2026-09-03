@@ -85,9 +85,15 @@ async def main():
             log.warning(f"WS drop -> reconnecting: {payload}")
         elif kind == "msg":
             ch = payload.get("channel")
-            if ch == "l2Book":
+            if ch == "bbo":                          # the fast touch — drives reach + freshness
+                d = payload["data"]; b, a = d["bbo"]
+                if b and a:
+                    t = int(d["time"]) * 1_000_000
+                    market.note_lag(now, t)
+                    market.update_bbo(d["coin"], float(b["px"]), float(b["sz"]),
+                                      float(a["px"]), float(a["sz"]), t)
+            elif ch == "l2Book":
                 coin, bids, asks, t = parse_l2(payload["data"])
-                market.note_lag(now, t)
                 market.update_l2(coin, bids, asks, t); rec.l2_snap(coin, bids, asks, t)
             elif ch == "trades":
                 for tr in payload["data"]:
