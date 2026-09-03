@@ -45,6 +45,8 @@ class PaperExecution:
         self.RESERVE_FRAC = e["burst_reserve_frac"]
         self.TAKER, self.MAKER = f["taker_bps"], f["maker_bps"]
         self.positions, self.closed = [], []
+        self.shadow_closed = []                     # skipped-for-capital signals, tracked not traded
+        self.SHADOW = e.get("shadow_skipped", True)
         self.n_skipped = 0
         self.tradable = True
         self.feed_ok = True                         # set False by the latency guard (run.py)
@@ -61,26 +63,33 @@ class PaperExecution:
         self.tradable = p["tradable"]
 
     def is_flat(self):
-        return not any(p["status"] != "closed" for p in self.positions)
+        """Shadows hold no capital, so they must not block a resize."""
+        return not any(p["status"] != "closed" and not p.get("shadow") for p in self.positions)
 
     # --- capital rationing (§AC.2) ---------------------------------------
     def room_for(self, sleeve):
         """Remaining gross $ this sleeve may commit. BURST: the whole cap. DEEP: cap - reserve."""
-        gross = sum(p["size"] for p in self.positions if p["status"] != "closed")
+        gross = sum(p["size"] for p in self.positions
+                    if p["status"] != "closed" and not p.get("shadow"))
         return max(self.CAP if sleeve == "BURST" else self.CAP - self.RESERVE, 0.0) - gross
 
     def _size_for(self, sig, bk):
-        """Depth-aware size, then clipped to the sleeve's remaining room. Returns 0.0 if not worth taking."""
+        """Depth-aware size, then clipped to the sleeve's remaining room. Returns 0.0 if not worth
+        taking; sets self._no_room when the reason was CAPITAL RATIONING specifically (so the shadow
+        book only measures opportunity cost, not feed halts or equity floors)."""
+        self._no_room = False
         if not self.tradable:                       # equity below capital.min_equity_usd
             return 0.0
         if not self.feed_ok:                        # feed lag over guards.max_feed_lag_ms
             return 0.0
-        if len([p for p in self.positions if p["status"] != "closed"]) >= self.MAXOPEN:
+        if len([p for p in self.positions
+                if p["status"] != "closed" and not p.get("shadow")]) >= self.MAXOPEN:
             return 0.0
         room = self.room_for(sig.sleeve)
         if room < self.MINQ:
             self.n_skipped += 1
             self.log.info(f"[SKIP ] {sig.coin} {sig.sleeve} no room (${room:,.0f} < ${self.MINQ:,.0f})")
+            self._no_room = True
             return 0.0
         buy = sig.dir > 0
         levels = bk["asks"] if buy else bk["bids"]; touch = bk["ask"] if buy else bk["bid"]
@@ -94,6 +103,8 @@ class PaperExecution:
             return
         size = self._size_for(sig, bk)
         if size <= 0:
+            if self.SHADOW and getattr(self, "_no_room", False):
+                self._open_shadow(sig, bk)
             return
         buy = sig.dir > 0
         pin = walk(bk["asks"] if buy else bk["bids"], size)
@@ -104,6 +115,21 @@ class PaperExecution:
                                    exit_level=None, q_ahead=0.0, q_you=0.0, cum=0.0, exit_start=0))
         self.log.info(f"[OPEN ] {sig.sleeve} {sig.coin} {'LONG' if buy else 'SHORT'} @ {pin:.6g} "
                       f"${size:,.0f} breadth {sig.breadth} reach {sig.reach:.0f}bps")
+
+    def _open_shadow(self, sig, bk):
+        """A signal we could not fund, run through the SAME lifecycle so we can price the opportunity cost of
+        capital rationing. Sized at the full intended per-trade size (what we WOULD have done), commits no
+        capital, and is excluded from gross/max_open/is_flat. It also does not consume liquidity, so at this
+        book size its fills are a fair counterfactual."""
+        buy = sig.dir > 0
+        levels = bk["asks"] if buy else bk["bids"]; touch = bk["ask"] if buy else bk["bid"]
+        size = max(size_within_budget(levels, touch, buy, self.SLIP, self.SIZE), 1.0)
+        pin = walk(levels, size)
+        if not np.isfinite(pin) or pin <= 0:
+            return
+        self.positions.append(dict(coin=sig.coin, dir=sig.dir, entry_ts=self._now(), entry_px=pin, size=size,
+                                   status="open", breadth=sig.breadth, sw_span=sig.sw_span, sleeve=sig.sleeve,
+                                   shadow=True, exit_level=None, q_ahead=0.0, q_you=0.0, cum=0.0, exit_start=0))
 
     def on_trade(self, coin, px, sz, de, t_ns):
         for pos in self.positions:                              # accumulate maker-exit fill volume
@@ -141,6 +167,13 @@ class PaperExecution:
         de = pos["dir"]; fee = self.TAKER + (self.MAKER if kind == "maker" else self.TAKER)
         net = de * (exit_px - pos["entry_px"]) / pos["entry_px"] * 1e4 - fee
         pos["status"] = "closed"
+        if pos.get("shadow"):
+            self.shadow_closed.append(dict(coin=pos["coin"], sleeve=pos["sleeve"], dir=de,
+                                          entry_ts=pos["entry_ts"], size=pos["size"], kind=kind,
+                                          net_bps=net, usd=net * pos["size"] / 1e4))
+            self.log.info(f"[SHADOW] {pos['sleeve']} {pos['coin']} {kind} net {net:+.1f}bps "
+                          f"${net * pos['size'] / 1e4:+.2f} (not traded - no capital)")
+            return
         self.closed.append(dict(coin=pos["coin"], sleeve=pos.get("sleeve", "BURST"), dir=de,
                                 entry_ts=pos["entry_ts"], entry_px=pos["entry_px"],
                                 size=pos["size"], exit_px=exit_px, kind=kind, net_bps=net, usd=net * pos["size"] / 1e4,
@@ -179,6 +212,9 @@ class LiveExecution(PaperExecution):
     def __init__(self, cfg, market, log):
         super().__init__(cfg, market, log)
         ls = cfg["live_safety"]
+        # HARD OFF live: poll() here SENDS ORDERS, so a shadow position would place real trades.
+        # The shadow book is a paper-only measurement device.
+        self.SHADOW = False
         self.dry = ls["dry_run"]; self.kill = cfg["_root"] / ls["killswitch_file"]
         # max_notional / daily_loss_stop are DERIVED from wallet equity via apply_capital().
         self.max_notional = self.daily_loss_stop = 0.0

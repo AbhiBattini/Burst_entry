@@ -65,7 +65,7 @@ async def main():
     params = cap.initial()
     strat.apply_capital(params); execu.apply_capital(params)
     execu.reconcile_on_start()                       # flatten any orphaned position/order before trading (live only)
-    rec = Recorder(cfg, execu.closed)
+    rec = Recorder(cfg, execu.closed, getattr(execu, "shadow_closed", None))
     feed = HLFeed(cfg["endpoint"]["ws"], cfg["universe"])
     deadline = time.time() + args.duration if args.duration else None
     e = cfg["execution"]
@@ -137,6 +137,13 @@ async def main():
         for sl, g in c.groupby("sleeve"):            # BURST carries the book; watch the split, not the total
             log.info(f"  {sl:>5}: ${g.usd.sum():+.2f} on {len(g)} trades, mean {g.net_bps.mean():+.2f}bps, "
                      f"win {100 * (g.net_bps > 0).mean():.0f}%")
+    sh = getattr(execu, "shadow_closed", [])
+    if sh:                                           # what the current book size COST you
+        import pandas as _pd
+        d = _pd.DataFrame(sh)
+        log.info(f"SHADOW (skipped for capital, NOT traded): ${d.usd.sum():+.2f} on {len(d)} signals, "
+                 f"mean {d.net_bps.mean():+.2f}bps, win {100 * (d.net_bps > 0).mean():.0f}% "
+                 f"-- this is the opportunity cost of the current book size")
 
 
 if __name__ == "__main__":

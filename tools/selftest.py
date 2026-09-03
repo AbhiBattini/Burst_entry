@@ -174,8 +174,8 @@ ex.on_signal(Sig("BBB", 1.0, "BURST"))
 sizes = [p["size"] for p in ex.positions if p["status"] != "closed"]
 check("BURST still gets the reserved $250", len(sizes) == 2 and abs(sizes[1] - 250.0) < 1e-6, f"{sizes}")
 ex.on_signal(Sig("AAA", 1.0, "DEEP"))
-check("gross cap is hard (3rd entry refused on $)", len([p for p in ex.positions if p["status"] != "closed"]) == 2,
-      f"{len(ex.positions)} positions")
+n_funded = len([p for p in ex.positions if p["status"] != "closed" and not p.get("shadow")])
+check("gross cap is hard (3rd entry refused on $)", n_funded == 2, f"{n_funded} funded positions")
 
 # max_open is a SECOND, independent rail — check it binds on its own when it is the tighter one
 cfg2, s2, m2, ex2 = mk(COINS, cap=100_000.0, size=100_000.0, max_open=1)
@@ -261,6 +261,36 @@ check("halted feed refuses new entries", len(ex6.positions) == 0, f"{len(ex6.pos
 ex6.feed_ok = True
 ex6.on_signal(Sig("AAA", 1.0, "BURST"))
 check("recovered feed resumes entries", len(ex6.positions) == 1, f"{len(ex6.positions)} positions")
+
+# ── 7. shadow book (opportunity cost of capital rationing) ──────────────────────────────────────────
+print("\n7. shadow book for capital-skipped signals")
+cfg7, s7, m7b, ex7 = mk(COINS, cap=1000.0, size=1000.0)
+t7 = NS * 10_000
+book(m7b, "AAA", t7); book(m7b, "BBB", t7); ex7._now = lambda: t7
+ex7.on_signal(Sig("AAA", 1.0, "BURST"))                     # funded: consumes the whole cap
+real = [p for p in ex7.positions if not p.get("shadow")]
+check("first signal is funded", len(real) == 1, f"{len(real)} real")
+ex7.on_signal(Sig("BBB", 1.0, "BURST"))                     # no room -> shadow
+shadows = [p for p in ex7.positions if p.get("shadow")]
+check("skipped signal becomes a shadow", len(shadows) == 1, f"{len(shadows)} shadow")
+check("shadow consumes NO capital", abs(ex7.room_for("BURST")) < 1e-6,
+      f"room ${ex7.room_for('BURST'):,.0f} (negative would mean shadows are counted)")
+check("a real open position still blocks a resize", ex7.is_flat() is False)
+for p_ in real:
+    p_["status"] = "closed"
+check("book reads flat once only shadows remain", ex7.is_flat() is True)
+
+n_real_before = len(ex7.closed)
+ex7._close(shadows[0], shadows[0]["entry_px"] * 1.001, "maker")
+check("shadow close does NOT enter traded P&L", len(ex7.closed) == n_real_before, f"{len(ex7.closed)}")
+check("shadow close lands in the shadow book", len(ex7.shadow_closed) == 1, f"{len(ex7.shadow_closed)}")
+
+# must be impossible in live mode, where poll() sends real orders
+import src.execution as _ex
+cfg_live = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8")); cfg_live["_root"] = ROOT
+cfg_live["live_safety"]["dry_run"] = True
+lg = logging.getLogger("selftest2"); lg.addHandler(logging.NullHandler())
+check("LiveExecution never shadows", _ex.LiveExecution(cfg_live, m7b, lg).SHADOW is False)
 
 print(f"\n{'ALL PASS' if not FAILS else 'FAILURES: ' + ', '.join(FAILS)}")
 sys.exit(1 if FAILS else 0)

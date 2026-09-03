@@ -98,6 +98,10 @@ execution:
                                 # ~$20k in the Oct-10 cascade vs ~$101k calm, §AF).
   stop_bps: 100                 # path stop
   maker_improve_ticks: 1        # post the exit this many ticks inside the touch
+  shadow_skipped: true          # PAPER ONLY. Track signals skipped for lack of capital through the same
+                                # lifecycle without committing capital, so you can price the opportunity cost
+                                # of the current book size (at $1.5k you skip most signals). Forced OFF in
+                                # live mode, where poll() sends real orders.
   max_open: 2                   # secondary hard cap on concurrent POSITIONS (the gross $ cap is primary and
                                 # already binds at small equity). Research default 5; held at 2 as a cheap
                                 # belt for a small account. Raise as capital grows.
