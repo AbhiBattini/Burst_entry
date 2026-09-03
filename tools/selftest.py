@@ -324,5 +324,26 @@ ex8._close(ex8.positions[0], ex8.positions[0]["entry_px"], "maker")
 check("drift + slip survive onto the closed trade",
       "drift_bps" in ex8.closed[0] and "slip_bps" in ex8.closed[0], f"{sorted(ex8.closed[0])[:4]}...")
 
+# ── 9. stale depth ladder must not be sized against ─────────────────────────────────────────────────
+print("\n9. stale-ladder guard (the primary cascade guard reads the ladder)")
+cfg9, s9, m9, ex9 = mk(COINS, cap=10_000.0, size=10_000.0)
+t9 = NS * 10_000
+book(m9, "AAA", t9, mid=100.0); ex9._now = lambda: t9
+bk9 = m9.book["AAA"]
+check("fresh ladder is usable", ex9._size_for(Sig("AAA", 1.0, "BURST"), bk9) > 0)
+
+# advance ONLY the touch (as bbo does), leaving the ladder behind -- exactly the public-feed situation
+m9.update_bbo("AAA", 99.995, 10.0, 100.005, 10.0, t9 + 20 * NS)
+age_ms = (bk9["t"] - bk9["t_ladder"]) / 1e6
+check("ladder ages while the touch moves on", age_ms > ex9.MAXLADDER_MS, f"{age_ms:.0f}ms")
+check("stale ladder refuses to size", ex9._size_for(Sig("AAA", 1.0, "BURST"), bk9) == 0.0)
+check("stale-ladder skips are counted", ex9.n_stale_ladder == 1, f"{ex9.n_stale_ladder}")
+
+# a stale ladder is NOT a capital problem -- it must not be logged as opportunity cost
+n_shadow_before = len([p for p in ex9.positions if p.get("shadow")])
+ex9.on_signal(Sig("AAA", 1.0, "BURST"))
+check("stale ladder does NOT create a shadow (not a capital skip)",
+      len([p for p in ex9.positions if p.get("shadow")]) == n_shadow_before)
+
 print(f"\n{'ALL PASS' if not FAILS else 'FAILURES: ' + ', '.join(FAILS)}")
 sys.exit(1 if FAILS else 0)

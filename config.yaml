@@ -93,6 +93,11 @@ execution:
                                 # (cap * (1 - frac)). Without a reserve DEEP crowds out 58 of 140 BURST
                                 # triggers (§AC.2), and BURST is the sleeve with positive body income in
                                 # BOTH regimes.
+  max_ladder_age_ms: 12000      # Refuse to size off a depth ladder older than this. HL's public l2Book is
+                                # a ~5.4s periodic snapshot, and depth-aware sizing (the PRIMARY cascade
+                                # guard) walks that ladder -- a stale one OVERSTATES depth precisely in a
+                                # fast move, sizing us up when it should size us down. 12s ~= 2 missed
+                                # snapshots: tolerant of normal jitter, catches a genuinely dead ladder.
   max_entry_drift_bps: 60       # ANTI-CHASE. Abort the entry if the mid has already moved this far our way
                                 # between the trigger and our send. That gap is where latency -- and anyone
                                 # acting on the same PUBLIC sweep faster -- actually costs money, and it

@@ -49,11 +49,19 @@ class PaperExecution:
         # backtest prices entry at te+0.4s and so already contains normal drift. Measure the live
         # distribution before tightening this, or you are deviating from the researched spec.
         self.MAXDRIFT = e.get("max_entry_drift_bps", 60.0)
+        # Depth-aware sizing walks the l2Book LADDER, which on HL's public feed is a ~5.4s periodic
+        # snapshot (§AH.2). In a fast move a stale ladder OVERSTATES available depth -- so the primary
+        # cascade guard would size us UP exactly when it should be sizing us down. Refuse to size off a
+        # ladder older than this. A local non-validating node would publish raw book diffs at full cadence
+        # and remove the problem, but that is a 32-core/128GB/100GB-per-day machine (§AH.4) -- so on the
+        # public feed we guard instead.
+        self.MAXLADDER_MS = e.get("max_ladder_age_ms", 12000.0)
         self.TAKER, self.MAKER = f["taker_bps"], f["maker_bps"]
         self.positions, self.closed = [], []
         self.shadow_closed = []                     # skipped-for-capital signals, tracked not traded
         self.SHADOW = e.get("shadow_skipped", True)
         self.n_skipped = 0
+        self.n_stale_ladder = 0
         self.tradable = True
         self.feed_ok = True                         # set False by the latency guard (run.py)
         # CAP / SIZE / MINQ / RESERVE are set by apply_capital() — derived from wallet equity (src/capital.py),
@@ -114,6 +122,14 @@ class PaperExecution:
         buy = sig.dir > 0
         levels = bk["asks"] if buy else bk["bids"]; touch = bk["ask"] if buy else bk["bid"]
         if not levels:                              # bbo arrived but no depth ladder yet (first ~5s)
+            return 0.0
+        # ladder age is measured on the EXCHANGE clock (touch ts vs ladder ts), so local skew cannot
+        # silently disable this guard -- same reasoning as MarketState.stale_books.
+        lad_age = (bk.get("t", 0) - bk.get("t_ladder", 0)) / 1e6
+        if lad_age > self.MAXLADDER_MS:
+            self.n_stale_ladder += 1
+            self.log.info(f"[SKIP ] {sig.coin} {sig.sleeve} ladder {lad_age:.0f}ms stale "
+                          f"(>{self.MAXLADDER_MS:.0f}) - depth-aware sizing would be reading a dead book")
             return 0.0
         size = min(size_within_budget(levels, touch, buy, self.SLIP, self.SIZE), room)
         return size if size >= self.MINQ else 0.0
