@@ -118,10 +118,14 @@ class MarketState:
 
 
 class Signal:
-    __slots__ = ("coin", "dir", "breadth", "sw_span", "ts", "sleeve", "reach", "vol")
-    def __init__(self, coin, d, breadth, sw_span, ts, sleeve, reach, vol):
+    __slots__ = ("coin", "dir", "breadth", "sw_span", "ts", "sleeve", "reach", "vol", "ref_px")
+    def __init__(self, coin, d, breadth, sw_span, ts, sleeve, reach, vol, ref_px):
         self.coin, self.dir, self.breadth, self.sw_span, self.ts = coin, d, breadth, sw_span, ts
         self.sleeve, self.reach, self.vol = sleeve, reach, vol
+        # mid at ORDER START -- the price the research measures reach against. Execution compares its actual
+        # fill to this to decompose implementation shortfall into DRIFT (being late / others acting on the
+        # same sweep first) vs SLIPPAGE (our own book-walk). Neither is visible without it.
+        self.ref_px = ref_px
 
 
 class StrategyA:
@@ -207,13 +211,13 @@ class StrategyA:
             breadth = sum(1 for (st, sc, sd) in self.sweeps if sc != coin and sd == a["dir"])
             self.sweeps.append((te, coin, a["dir"]))
             self.pending.append(dict(sleeve="BURST", ts=te, coin=coin, dir=a["dir"],
-                                     reach=reach, breadth=breadth, vol=vol))
+                                     reach=reach, breadth=breadth, vol=vol, ref=a["mid"]))
         if self.DEEP_ON and np.isfinite(vol) and vol <= self.VCEIL \
                 and reach >= max(self.KVOL * vol, self.DEEP_FLOOR, adaptive) \
                 and te - self.last_deep[coin] >= self.NONOVL:
             self.last_deep[coin] = te; self.n_deep += 1        # non-overlapped DEEP candidate
             self.pending.append(dict(sleeve="DEEP", ts=te, coin=coin, dir=a["dir"],
-                                     reach=reach, breadth=0, vol=vol))
+                                     reach=reach, breadth=0, vol=vol, ref=a["mid"]))
 
     # --- gates + emission -------------------------------------------------
     def poll(self, now_ns):
@@ -234,7 +238,7 @@ class StrategyA:
                 continue
             if p["sleeve"] == "DEEP":                           # no breadth / sw_span gate (§AC.2)
                 if (coin, te) not in burst_fired:               # BURST wins an exact duplicate
-                    out.append(Signal(coin, de, 0, span, te, "DEEP", p["reach"], p["vol"]))
+                    out.append(Signal(coin, de, 0, span, te, "DEEP", p["reach"], p["vol"], p["ref"]))
                 continue
             self.swhist.append(span); self.swsince += 1         # the median tracks BURST candidates
             if self.swsince >= self.SWREF and len(self.swhist) >= self.SWMINC:
@@ -247,5 +251,5 @@ class StrategyA:
             if len(q) >= self.NMAX:
                 continue
             q.append(te); burst_fired.add((coin, te))
-            out.append(Signal(coin, de, p["breadth"], span, te, "BURST", p["reach"], p["vol"]))
+            out.append(Signal(coin, de, p["breadth"], span, te, "BURST", p["reach"], p["vol"], p["ref"]))
         return out

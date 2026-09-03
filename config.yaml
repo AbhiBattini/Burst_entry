@@ -93,6 +93,14 @@ execution:
                                 # (cap * (1 - frac)). Without a reserve DEEP crowds out 58 of 140 BURST
                                 # triggers (§AC.2), and BURST is the sleeve with positive body income in
                                 # BOTH regimes.
+  max_entry_drift_bps: 60       # ANTI-CHASE. Abort the entry if the mid has already moved this far our way
+                                # between the trigger and our send. That gap is where latency -- and anyone
+                                # acting on the same PUBLIC sweep faster -- actually costs money, and it
+                                # cannot be measured before trading. Drift is LOGGED on every entry and
+                                # stored on every closed trade regardless; this only ABORTS the extremes.
+                                # Deliberately LOOSE: the backtest prices entry at te+0.4s and so already
+                                # contains normal drift. MEASURE the live distribution (OPERATIONS §3) before
+                                # tightening, or you are silently deviating from the researched spec.
   slip_budget_bps: 30           # depth-aware sizing: largest notional fillable within this of touch. THE
                                 # primary cascade guard — automatic, no regime detection (throttled fill to
                                 # ~$20k in the Oct-10 cascade vs ~$101k calm, §AF).

@@ -43,6 +43,12 @@ class PaperExecution:
         self.HOLD, self.EXW = e["hold_s"], e["exitwin_s"]
         self.SLIP, self.STOP, self.TICKS, self.MAXOPEN = e["slip_budget_bps"], e["stop_bps"], e["maker_improve_ticks"], e["max_open"]
         self.RESERVE_FRAC = e["burst_reserve_frac"]
+        # Adverse move between the trigger and our entry. This is where being late -- or someone acting on
+        # the same public sweep first -- actually costs money, and it CANNOT be measured before trading.
+        # Logged on every entry; only ABORTS above max_entry_drift_bps. Loose by default on purpose: the
+        # backtest prices entry at te+0.4s and so already contains normal drift. Measure the live
+        # distribution before tightening this, or you are deviating from the researched spec.
+        self.MAXDRIFT = e.get("max_entry_drift_bps", 60.0)
         self.TAKER, self.MAKER = f["taker_bps"], f["maker_bps"]
         self.positions, self.closed = [], []
         self.shadow_closed = []                     # skipped-for-capital signals, tracked not traded
@@ -73,6 +79,15 @@ class PaperExecution:
                     if p["status"] != "closed" and not p.get("shadow"))
         return max(self.CAP if sleeve == "BURST" else self.CAP - self.RESERVE, 0.0) - gross
 
+    def entry_drift_bps(self, sig, bk):
+        """Signed adverse move from the trigger mid to now, in bps. POSITIVE = the market already ran our
+        way, i.e. we are buying after the move -- the direct cost of latency and of anyone front-running the
+        same sweep. NEGATIVE = it came back to us."""
+        ref = getattr(sig, "ref_px", None)
+        if not ref or ref <= 0 or bk.get("mid") is None:
+            return 0.0
+        return float(sig.dir * (bk["mid"] - ref) / ref * 1e4)
+
     def _size_for(self, sig, bk):
         """Depth-aware size, then clipped to the sleeve's remaining room. Returns 0.0 if not worth
         taking; sets self._no_room when the reason was CAPITAL RATIONING specifically (so the shadow
@@ -84,6 +99,11 @@ class PaperExecution:
             return 0.0
         if len([p for p in self.positions
                 if p["status"] != "closed" and not p.get("shadow")]) >= self.MAXOPEN:
+            return 0.0
+        drift = self.entry_drift_bps(sig, bk)
+        if drift > self.MAXDRIFT:                   # the move already happened -- do not chase it
+            self.log.info(f"[SKIP ] {sig.coin} {sig.sleeve} drift {drift:+.0f}bps > {self.MAXDRIFT:.0f} "
+                          f"(entry would chase a move already made)")
             return 0.0
         room = self.room_for(sig.sleeve)
         if room < self.MINQ:
@@ -112,11 +132,16 @@ class PaperExecution:
         pin = walk(bk["asks"] if buy else bk["bids"], size)
         if not np.isfinite(pin) or pin <= 0:
             return
+        drift = self.entry_drift_bps(sig, bk)
+        touch = bk["ask"] if buy else bk["bid"]
+        slip = float(sig.dir * (pin - touch) / touch * 1e4) if touch else 0.0
         self.positions.append(dict(coin=sig.coin, dir=sig.dir, entry_ts=self._now(), entry_px=pin, size=size,
                                    status="open", breadth=sig.breadth, sw_span=sig.sw_span, sleeve=sig.sleeve,
+                                   drift_bps=drift, slip_bps=slip,
                                    exit_level=None, q_ahead=0.0, q_you=0.0, cum=0.0, exit_start=0))
         self.log.info(f"[OPEN ] {sig.sleeve} {sig.coin} {'LONG' if buy else 'SHORT'} @ {pin:.6g} "
-                      f"${size:,.0f} breadth {sig.breadth} reach {sig.reach:.0f}bps")
+                      f"${size:,.0f} breadth {sig.breadth} reach {sig.reach:.0f}bps "
+                      f"drift {drift:+.1f}bps slip {slip:+.1f}bps")
 
     def _open_shadow(self, sig, bk):
         """A signal we could not fund, run through the SAME lifecycle so we can price the opportunity cost of
@@ -179,7 +204,9 @@ class PaperExecution:
         self.closed.append(dict(coin=pos["coin"], sleeve=pos.get("sleeve", "BURST"), dir=de,
                                 entry_ts=pos["entry_ts"], entry_px=pos["entry_px"],
                                 size=pos["size"], exit_px=exit_px, kind=kind, net_bps=net, usd=net * pos["size"] / 1e4,
-                                breadth=pos["breadth"], sw_span=pos["sw_span"]))
+                                breadth=pos["breadth"], sw_span=pos["sw_span"],
+                                drift_bps=pos.get("drift_bps", float("nan")),
+                                slip_bps=pos.get("slip_bps", float("nan"))))
         self.log.info(f"[CLOSE] {pos.get('sleeve','BURST')} {pos['coin']} {kind} "
                       f"net {net:+.1f}bps ${net * pos['size'] / 1e4:+.2f}")
 
@@ -326,12 +353,16 @@ class LiveExecution(PaperExecution):
         fill_px = self._live_taker(sig.coin, buy, coin_sz, size, touch)     # entry send (dry logs, returns modeled)
         if not np.isfinite(fill_px) or fill_px <= 0:
             self.log.error(f"[entry ABORT] {sig.coin} no valid fill px -> not tracking a phantom position"); return
+        drift = self.entry_drift_bps(sig, bk)
+        slip = float(sig.dir * (fill_px - touch) / touch * 1e4) if touch else 0.0
         self.positions.append(dict(coin=sig.coin, dir=sig.dir, entry_ts=self._now(), entry_px=fill_px, size=size,
                                    status="open", breadth=sig.breadth, sw_span=sig.sw_span, sleeve=sig.sleeve,
+                                   drift_bps=drift, slip_bps=slip,
                                    exit_level=None, q_ahead=0.0, q_you=0.0, cum=0.0, exit_start=0,
                                    exit_oid=None, last_poll=0))
         self.log.info(f"[OPEN ] {sig.sleeve} {sig.coin} {'LONG' if buy else 'SHORT'} @ {fill_px:.6g} "
-                      f"${size:,.0f} breadth {sig.breadth} reach {sig.reach:.0f}bps")
+                      f"${size:,.0f} breadth {sig.breadth} reach {sig.reach:.0f}bps "
+                      f"drift {drift:+.1f}bps slip {slip:+.1f}bps")
 
     # --- lifecycle (full reimpl so live code is what dry_run exercises) --
     def poll(self, now_ns):

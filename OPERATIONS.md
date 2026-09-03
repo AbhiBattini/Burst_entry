@@ -125,6 +125,33 @@ queue-aware fills at ≈0.55× that, which is why the honest $/day estimate is r
 live maker share is what replaces that assumed 0.55× with a measured one. **This is the single number the
 paper run exists to produce.**
 
+### Entry quality — drift vs slippage (the front-running measure)
+
+```bash
+cd ~/Burst_entry && .venv/bin/python -c "
+import pandas as pd; d=pd.read_parquet('paper_trades.parquet')
+print(d[['drift_bps','slip_bps','net_bps']].describe().loc[['count','mean','50%','75%','max']].round(2))
+print()
+print('drift > 20bps:', round(100*(d.drift_bps>20).mean(),1), '% of entries')
+print('net_bps when drift<=10 :', round(d.loc[d.drift_bps<=10,'net_bps'].mean(),2))
+print('net_bps when drift> 10 :', round(d.loc[d.drift_bps> 10,'net_bps'].mean(),2))
+"
+```
+
+Every entry records the implementation shortfall, split into its two causes:
+
+- **`drift_bps`** — how far the mid moved OUR WAY between the trigger and our fill. Positive = we are buying
+  after the move. This is the cost of latency **and of anyone acting on the same public sweep faster than
+  us**. It is the thing that cannot be measured before trading.
+- **`slip_bps`** — our own book-walk from the touch, i.e. the cost of size. Already researched (§J found
+  entry slippage ~= the whole gross edge at $10k on an 8-name basket).
+
+**How to act on it.** If `net_bps` is materially worse in the high-drift bucket, you are being beaten to the
+move and `execution.max_entry_drift_bps` should come down toward the point where the buckets diverge. If the
+buckets look the same, drift is not costing you and the guard should stay loose — **tightening it deviates
+from the researched spec**, which prices entry at te+0.4s and therefore already contains normal drift.
+Collect a few hundred entries before touching it.
+
 ### Per-sleeve split
 
 ```bash

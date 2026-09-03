@@ -292,5 +292,37 @@ cfg_live["live_safety"]["dry_run"] = True
 lg = logging.getLogger("selftest2"); lg.addHandler(logging.NullHandler())
 check("LiveExecution never shadows", _ex.LiveExecution(cfg_live, m7b, lg).SHADOW is False)
 
+# ── 8. entry drift: measurement + anti-chase guard ──────────────────────────────────────────────────
+print("\n8. entry drift (implementation shortfall / front-running measure)")
+cfg8, s8, m8, ex8 = mk(COINS, cap=10_000.0, size=10_000.0)
+t8 = NS * 10_000
+book(m8, "AAA", t8, mid=100.0); ex8._now = lambda: t8
+
+
+class DriftSig(Sig):
+    def __init__(self, coin, d, sleeve, ref):
+        super().__init__(coin, d, sleeve); self.ref_px = ref
+
+
+check("no move since trigger -> ~0 drift",
+      abs(ex8.entry_drift_bps(DriftSig("AAA", 1.0, "BURST", 100.0), m8.book["AAA"])) < 1e-6)
+d_up = ex8.entry_drift_bps(DriftSig("AAA", 1.0, "BURST", 99.5), m8.book["AAA"])
+check("mid ran our way -> POSITIVE drift (we are chasing)", d_up > 0, f"{d_up:+.1f}bps")
+d_dn = ex8.entry_drift_bps(DriftSig("AAA", -1.0, "BURST", 99.5), m8.book["AAA"])
+check("same move, opposite side -> NEGATIVE drift", d_dn < 0, f"{d_dn:+.1f}bps")
+check("drift is sign-symmetric", abs(d_up + d_dn) < 1e-6, f"{d_up:+.2f} vs {d_dn:+.2f}")
+
+ex8.MAXDRIFT = 20.0
+ex8.on_signal(DriftSig("AAA", 1.0, "BURST", 99.5))          # ~50bps of chase, over the 20bps bar
+check("guard aborts a chased entry", len(ex8.positions) == 0, f"{len(ex8.positions)} positions")
+ex8.MAXDRIFT = 500.0
+ex8.on_signal(DriftSig("AAA", 1.0, "BURST", 99.5))
+check("loose guard allows it", len(ex8.positions) == 1, f"{len(ex8.positions)} positions")
+check("drift + slip recorded on the position",
+      "drift_bps" in ex8.positions[0] and "slip_bps" in ex8.positions[0])
+ex8._close(ex8.positions[0], ex8.positions[0]["entry_px"], "maker")
+check("drift + slip survive onto the closed trade",
+      "drift_bps" in ex8.closed[0] and "slip_bps" in ex8.closed[0], f"{sorted(ex8.closed[0])[:4]}...")
+
 print(f"\n{'ALL PASS' if not FAILS else 'FAILURES: ' + ', '.join(FAILS)}")
 sys.exit(1 if FAILS else 0)
