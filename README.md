@@ -8,6 +8,9 @@ maker-improve exit, with depth-aware sizing and a 100 bps path stop.
 Research and every honest caveat live in `../CLAUDE.md` (CURRENT STATE) and `../notes.md` (§Z–§AG); this folder is
 the **deployable system** distilled from that.
 
+**Running it day to day? See [`OPERATIONS.md`](OPERATIONS.md)** — service control, how to read P&L and exit
+quality, and what "normal" looks like.
+
 > **Status: paper-first.** Ships in `mode: paper`. The evidence is 14 calm days + 2 cascade windows, maker fills
 > are front-of-queue-optimistic, and Track 69 has deliberately **not** been promoted to the desk's deployed-book
 > table. Run paper, reconcile against the backtest, then decide.
@@ -28,8 +31,9 @@ the **deployable system** distilled from that.
   touch), 120 s hold, 100 bps path stop, maker post-only exit one tick inside the touch (60 s window, taker
   fallback).
 - **Feed-health halt:** new entries stop while the rolling median l2Book lag exceeds `guards.max_feed_lag_ms`
-  (400 ms — the entire reaction budget). Open positions keep managing their own exits, and entries resume on
-  their own when lag recovers. In-region expect single-digit to ~50 ms.
+  (1000 ms). Open positions keep managing their own exits, and entries resume on their own when lag recovers.
+  **Measured in-region baseline is ~285–310 ms** — that is HL's own publish/consensus floor, not your network
+  (connect RTT ~1.7 ms), so the halt is a fault threshold at ~3x baseline, not a budget check.
 - **Universe: 31 names** (HL top-40 perps by 24 h notional). BTC/ETH almost never fire a trade of their own but
   supply breadth for everyone else — monitor them anyway.
 
@@ -62,12 +66,12 @@ min_trade  = clip(gross_cap × 0.10, hl_min_order_usd, 500), capped at size_usd
 daily_stop = equity × 0.05
 ```
 
-So funding the wallet with $500 runs a $500 book; **add $9,500 and at the next flat refresh it runs a $10k book**
+So funding the wallet with $1,500 runs a $1,500 book; **add more and at the next flat refresh it resizes itself**
 — no config edit, no restart. The rule reproduces all three published configs exactly, and the self-test pins it:
 
 | equity | gross cap | per-trade | nmax | min trade |
 |---|---:|---:|---:|---:|
-| $500 | $500 | $500 | 1 | $50 |
+| $1,500 | $1,500 | $1,500 | 1 | $150 |
 | $10,000 | $10,000 | $10,000 | 1 | $500 |
 | $100,000 | $100,000 | $10,000 | **8** | $500 |
 
@@ -83,9 +87,10 @@ cap never moves under an open position. Paper mode, and any failed query, fall b
 The equity query is **read-only and needs no private key** — just `HL_ACCOUNT_ADDRESS` — so paper mode can size
 itself to your real wallet before any key is on the box.
 
-At $500 the strategy is mechanically identical, just 1/20 the notional. **It's a wiring test, not an income test**:
-at ~$1.4/trade one bad print or a missed reconnect dominates the P&L. What it validates is that live fills, fill
-rates and trade counts (~24/day) match paper — not whether the edge is there.
+At $1,500 the strategy is mechanically identical, just less notional per trade. **It's a wiring test, not an
+income test**: the P&L over any short window is noise. What it validates is that live fills, maker-exit fill rate
+and trade count (~24/day) match paper — not whether the edge is there. See `OPERATIONS.md` §4 for the reference
+numbers to compare against.
 
 ## Quick start
 
@@ -114,6 +119,7 @@ config.yaml     all tunables (universe, thresholds, sizing, guards, endpoints, m
 seed.json       per-token p99.8 ORDER reach + sw_span median, so thresholds warm from t0
 src/            config.py  capital.py  strategy.py  execution.py  feed.py  recorder.py  run.py
 tools/          build_seed.py (rebuild seed.json)   selftest.py (offline logic check)
+OPERATIONS.md   operator runbook: service control, P&L, exit quality, expected rates
 systemd/        strat-a.service  (installed by setup.sh --service)
 data/           recorder output (live trades + L2 snapshots; git-ignored)  <- free forward-OOS data
 .env            secrets for live mode (git-ignored; copy from .env.example)

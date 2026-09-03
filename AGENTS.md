@@ -35,6 +35,8 @@ HLFeed.stream()  --msg-->  run.main loop
   min trade, per-order cap and the daily stop. **No dollar amount is hand-set anywhere else.** Resizes only
   while flat. Read the module docstring before changing the derivation — it encodes §AD.
 - `tools/selftest.py` — offline logic check (no network). **Run it after any change to strategy/execution.**
+- `OPERATIONS.md` — operator runbook: service control, reading P&L / exit quality / the shadow book, expected
+  rates, and the looks-broken-but-isn't list. Point a new operator or agent there first.
 - `tools/build_seed.py` — rebuilds `seed.json` from the research pool (or `--from-archive` from raw HL data).
 
 ## How the code maps to the research (so you don't re-derive)

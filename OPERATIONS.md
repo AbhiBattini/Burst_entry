@@ -1,0 +1,312 @@
+# OPERATIONS — running and reading the paper book
+
+Operator/agent runbook for the deployed box. **What the strategy IS** lives in `README.md`; **why every
+parameter has its value** lives in `AGENTS.md` and `../notes.md`. This file is only: how to run it, how to
+read it, and what "normal" looks like.
+
+Everything below assumes the service install (`bash setup.sh --service`) on the AWS Tokyo box, repo at
+`~/Burst_entry`, running `mode: paper`.
+
+---
+
+## 0. Context a fresh operator needs
+
+| | |
+|---|---|
+| Where | AWS `ap-northeast-1` (Tokyo) — same region as HL's validators. Region is the only latency lever that matters. |
+| Mode | `paper` — simulates on the live feed, **sends no orders, needs no key** |
+| Universe | 31 HL perps (`config.yaml: universe`) |
+| Sizing | **Derived from wallet equity** by `src/capital.py`. Never hand-edit dollar amounts. |
+| Service | `strat-a` (systemd, `Restart=always`, survives reboot) |
+
+---
+
+## 1. Service control
+
+```bash
+systemctl is-active strat-a
+```
+
+```bash
+sudo systemctl start strat-a
+sudo systemctl stop strat-a
+sudo systemctl restart strat-a
+```
+
+**Halt new entries without killing the process** (open positions still manage their own exits — this is the
+safe "stop trading now" button, and the one to use in live mode):
+
+```bash
+touch ~/Burst_entry/KILL      # remove the file to resume
+```
+
+---
+
+## 2. Reading the logs
+
+Follow live (**Ctrl-C only stops the tailing, not the service**):
+
+```bash
+journalctl -u strat-a -f
+```
+
+Scope to the CURRENT run only — old runs cannot pollute the counts:
+
+```bash
+journalctl -u strat-a --since "$(systemctl show -p ActiveEnterTimestamp --value strat-a)"
+```
+
+Confirm the config that actually loaded (mode, universe, equity, sizing, DEEP thresholds):
+
+```bash
+journalctl -u strat-a | grep -m1 START
+```
+
+Warnings and errors only:
+
+```bash
+journalctl -u strat-a -p warning --since "6 hours ago"
+```
+
+### Log line vocabulary
+
+| Line | Meaning |
+|---|---|
+| `[capital]` | equity read and the sizing derived from it; also logs any resize |
+| `[feed]` | rolling median l2Book lag, once a minute |
+| `SIGNAL` | a gated signal fired (BURST or DEEP) |
+| `[OPEN ]` | position opened (paper) |
+| `[CLOSE]` | position closed — carries `maker`/`taker`/`stop` and net bps |
+| `[SKIP ]` | signal not funded — no capital room |
+| `[SHADOW]` | a skipped signal's counterfactual result (**not traded**) |
+| `flush` | recorder wrote parquet; carries cumulative traded and shadow P&L |
+
+---
+
+## 3. Results
+
+Fastest — the recorder logs a running total every 10 minutes:
+
+```bash
+journalctl -u strat-a | grep flush | tail -1
+```
+
+Full breakdown (safe before any trade has closed):
+
+```bash
+cd ~/Burst_entry && .venv/bin/python -c "
+import pandas as pd, os
+for f,lbl in [('paper_trades.parquet','TRADED'),('shadow_trades.parquet','SHADOW')]:
+    if os.path.exists(f):
+        d=pd.read_parquet(f)
+        print(f'{lbl:7} n={len(d):4d}  \${d.usd.sum():+8.2f}  {d.net_bps.mean():+6.2f} bps  win {100*(d.net_bps>0).mean():3.0f}%')
+    else: print(f'{lbl:7} (none yet)')
+"
+```
+
+### Exit quality — the most important number here
+
+```bash
+cd ~/Burst_entry && .venv/bin/python -c "
+import pandas as pd; d=pd.read_parquet('paper_trades.parquet')
+print(d.groupby('kind').agg(n=('usd','size'), usd=('usd','sum'), bps=('net_bps','mean')))
+print('maker share', round(100*(d.kind=='maker').mean(),1), '%')
+"
+```
+
+Or straight from the log:
+
+```bash
+journalctl -u strat-a | grep "\[CLOSE" | grep -oE "maker|taker|stop" | sort | uniq -c
+```
+
+**Why it matters:** the backtest's exit fills are *front-of-queue optimistic*. §Z.2 measured realistic
+queue-aware fills at ≈0.55× that, which is why the honest $/day estimate is roughly half the headline. The
+live maker share is what replaces that assumed 0.55× with a measured one. **This is the single number the
+paper run exists to produce.**
+
+### Per-sleeve split
+
+```bash
+cd ~/Burst_entry && .venv/bin/python -c "
+import pandas as pd; d=pd.read_parquet('paper_trades.parquet')
+print(d.groupby('sleeve').agg(n=('usd','size'), usd=('usd','sum'), bps=('net_bps','mean')))
+"
+```
+
+BURST should carry the book; DEEP is a small overlay.
+
+### Shadow book — the opportunity cost of the current book size
+
+Signals skipped **for lack of capital** are run through the identical lifecycle at the full intended size,
+committing no capital. Compare `SHADOW` to `TRADED` above:
+
+- shadow P&L ≈ 0 or negative → capital is **not** the constraint; adding funds buys little
+- shadow P&L consistently positive → direct evidence for sizing up
+
+Shadows never touch traded P&L, and are **hard-off in live mode**.
+
+### Activity counts
+
+```bash
+journalctl -u strat-a --since "1 day ago" | grep -oE "\[feed\]|SIGNAL|\[OPEN|\[CLOSE|\[SKIP|\[SHADOW" | sort | uniq -c
+```
+
+`[feed]` prints once a minute, so its count doubles as a runtime check (1440 ≈ a full day with no gaps).
+
+---
+
+## 4. What "normal" looks like
+
+Compare against these before concluding anything is wrong.
+
+| Metric | Expected | Source |
+|---|---|---|
+| Signals | ~1.1 / hour (~27/day) | backtest, 31 tokens |
+| Trades taken | ~1.0 / hour (~24/day) | 341 trades / 14 days |
+| — BURST | ~0.9 / hour | 304 / 14 days |
+| — DEEP | **~1 per 9 hours** | 37 / 14 days |
+| Maker exit share | ~62% (backtest assumption) | §AD pool |
+| Feed lag median | **~285–310 ms** | measured in-region 2026-09-02 |
+| Reconnects | rare; each leaves a ~3 s gap | — |
+| Recorder disk | ~400 MB/day | 31 books × ~2 L2 snaps/s |
+
+Rate is **not** uniform — §Z.8 found the edge concentrates 14–17 UTC, so expect clustering. Judge over a
+full day or more; hour-to-hour counts are Poisson noise at n≈1.
+
+### Looks broken, isn't
+
+- **Long stretches with no DEEP trades** — expected, it fires ~once per 9 hours.
+- **Frequent `[SKIP ] no room`** — expected at small equity; the book funds one position at a time.
+- **Nothing at all for the first ~15 min after a restart** — the rolling p99.8 re-warms from `seed.json` and
+  DEEP's vol window needs ~15 min of book before that sleeve can fire.
+- **Negative `[feed]` median lag** — the local clock is AHEAD of the exchange, i.e. an NTP problem, not a
+  fast feed. Fix with `sudo timedatectl set-ntp true`. The lag guard is unreliable until you do.
+- **~300 ms feed lag** — that is HL's own publish/consensus floor (HyperBFT ~200 ms), not your network.
+  Verify with the RTT check below; ~1–15 ms connect means the network is fine.
+
+---
+
+## 5. Health checks
+
+Network round trip to HL (should be ~1–15 ms from Tokyo; 100 ms+ means the box is in the wrong region):
+
+```bash
+curl -o /dev/null -s -w "connect %{time_connect}s  total %{time_total}s\n" https://api.hyperliquid.xyz/info
+```
+
+Clock sync — the feed-lag guard depends on it (`System clock synchronized: yes`):
+
+```bash
+timedatectl
+```
+
+Disk — **a full disk crashes the strategy**; the recorder writes ~400 MB/day:
+
+```bash
+df -h / && du -sh ~/Burst_entry/data
+```
+
+If it's filling up, either prune weekly or turn the recorder off in `config.yaml`:
+
+```bash
+crontab -e    # add: 0 3 * * * find /home/ubuntu/Burst_entry/data -name '*.parquet' -mtime +7 -delete
+```
+
+Memory (2 GiB box; lower `recorder.flush_s` from 600 to 300 if it's tight):
+
+```bash
+free -h
+```
+
+---
+
+## 6. Updating the code
+
+```bash
+cd ~/Burst_entry && git pull && sudo systemctl restart strat-a
+```
+
+**Always run the offline self-test after pulling** — it catches the silent failures (a detector that fires
+per-print, a solo sweep firing BURST with the edge inverted, a DEEP ignoring its vol ceiling, a reserve that
+doesn't reserve, a shadow leaking into traded P&L):
+
+```bash
+cd ~/Burst_entry && .venv/bin/python tools/selftest.py
+```
+
+Exit code 0 = all pass. **Do not run a book that fails this.**
+
+---
+
+## 7. Clean restart (wipe run data)
+
+```bash
+sudo systemctl stop strat-a
+```
+
+```bash
+cd ~/Burst_entry && rm -f paper_trades.parquet shadow_trades.parquet stratA.log && rm -rf data/*
+```
+
+```bash
+sudo systemctl start strat-a
+```
+
+To keep a run's results first:
+
+```bash
+cd ~/Burst_entry && mkdir -p runs && cp paper_trades.parquet shadow_trades.parquet runs/$(date +%Y%m%d_%H%M)_
+```
+
+---
+
+## 8. Changing capital
+
+**You do not edit dollar amounts.** `capital.mode: auto` reads wallet equity and derives gross cap,
+per-trade size, `nmax`, min trade, per-order cap and the daily stop. Fund the wallet and it follows within
+`capital.refresh_s`, applied only while flat.
+
+The one edit a big step-up needs is raising the ceiling above the new balance:
+
+```bash
+grep -n "max_equity_usd" ~/Burst_entry/config.yaml
+```
+
+That ceiling is deliberate — it exists so a stray deposit or a bad parse cannot silently size the book up.
+
+For paper without a wallet, `capital.paper_equity_usd` is the fallback. Verify what any equity would derive:
+
+```bash
+cd ~/Burst_entry && .venv/bin/python -c "
+import sys,logging,yaml; sys.path.insert(0,'.')
+from src.capital import CapitalManager
+log=logging.getLogger('t'); log.addHandler(logging.NullHandler())
+cfg=yaml.safe_load(open('config.yaml')); cfg['_root']='.'
+for eq in (1500, 10000, 100000):
+    p=CapitalManager(cfg,log).derive(eq)
+    print(eq, {k:p[k] for k in ['gross_cap_usd','size_usd','nmax','min_trade_usd','daily_loss_stop_usd']})
+"
+```
+
+---
+
+## 9. Before going live — do not skip
+
+Read `AGENTS.md` §Live in full. In order:
+
+1. Paper for days; reconcile rate and maker share against §4.
+2. `./setup.sh --live` (installs the HL SDK).
+3. `.env`: `HL_ACCOUNT_ADDRESS` = main account, `HL_PRIVATE_KEY` = **agent/API wallet** key (it can trade
+   but **cannot withdraw**). Never put a main MetaMask key on the box.
+4. `mode: live` with **`live_safety.dry_run: true`** — logs every order it would send without sending.
+   Watch a full session and reconcile against paper.
+5. First live boot: `live_safety.reconcile_mode: report` so startup reconciliation shows what it *would*
+   touch before it sends anything.
+6. Verify the SDK method signatures for your installed version — they drift between releases.
+7. Only then `dry_run: false`.
+
+**Standing caveats.** Evidence is 14 calm days + 2 cascade windows. Maker-exit fills are
+front-of-queue-optimistic. Track 69 has deliberately **not** been promoted to the desk's deployed-book
+table. Do not tune thresholds on a day of live data — every value in `config.yaml` traces to a research
+section, and most "obvious improvements" were already tested and killed (see `AGENTS.md`).
