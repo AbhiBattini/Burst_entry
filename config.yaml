@@ -31,6 +31,11 @@ detection:                      # sweep = ORDER reach >= max(floor, trailing p99
   reach_buf: 5000               # rolling fresh-reach buffer per book (now in ORDERS, not prints)
   reach_min_count: 400          # warm-up before the rolling p99.8 overrides the seed
   reach_refresh: 200            # recompute p99.8 every N fresh orders (keeps the hot path cheap)
+  replay_tolerance_ms: 1000     # reject an order stamped MORE than this BEFORE the book. HL replays recent
+                                # trades on (re)connect with their original stamps; a negative book age is
+                                # impossible for live flow, and the one-sided gate used to let it through --
+                                # producing signals priced off minutes-old trades. Small negatives are normal
+                                # channel jitter (trades and bbo arrive independently), so tolerate those.
   fresh_ms: 100                 # order counts only if book age at ORDER START < this (kills stale-book
                                 # artifacts + the seconds after a WS reconnect)
 

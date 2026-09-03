@@ -135,6 +135,7 @@ class StrategyA:
         self.m = market
         self.FLOOR, self.PCT, self.RBUF = d["reach_floor_bps"], d["reach_pctile"], d["reach_buf"]
         self.RMINC, self.REFRESH, self.FRESH_MS = d["reach_min_count"], d["reach_refresh"], d["fresh_ms"]
+        self.REPLAY_MS = d.get("replay_tolerance_ms", 1000)
         self.AGG_NS = int(d["agg_gap_ms"] * 1e6)
         self.BW, self.MINK = b["window_s"] * NS, b["min_k"]
         self.CLUS, self.SWMINC, self.SWREF = s["cluster_s"], s["min_count"], s["refresh"]
@@ -156,7 +157,7 @@ class StrategyA:
         self.swmed = seed.get("swspan_median") or float("inf")
         self.pending = []; self.fired = {1.0: deque(), -1.0: deque()}
         self.clock_hours = set(cfg.get("clock", {}).get("restrict_utc_hours") or [])
-        self.n_orders = self.n_sweeps = self.n_deep = 0
+        self.n_orders = self.n_sweeps = self.n_deep = self.n_replay = 0
 
     def apply_capital(self, p):
         """Adopt the burst dedup width from CapitalManager. §AD: nmax is a CAPITAL-RATIONING dial — it is 1
@@ -191,7 +192,13 @@ class StrategyA:
     def _close_order(self, coin, a):
         """One completed aggressor order -> update the rolling bar, then test both sleeves' reach bars."""
         self.n_orders += 1
-        if a["stale_ms"] >= self.FRESH_MS:                     # fresh-book filter, applied at ORDER START
+        # Two-sided. Positive-and-small = a normal fresh order. Large POSITIVE = a stale book (the original
+        # guard). Large NEGATIVE = the trade is stamped well BEFORE the book, which is impossible for live
+        # flow -- it is HL replaying history on (re)connect. Small negatives are normal channel jitter
+        # (trades and bbo arrive independently), so tolerate those.
+        if a["stale_ms"] >= self.FRESH_MS or a["stale_ms"] < -self.REPLAY_MS:
+            if a["stale_ms"] < -self.REPLAY_MS:
+                self.n_replay += 1
             return
         reach = max(a["ext"], 0.0) / a["mid"] * 1e4
         buf = self.reach[coin]; buf.append(reach); self.since[coin] += 1

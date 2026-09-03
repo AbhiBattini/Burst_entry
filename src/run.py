@@ -127,6 +127,9 @@ async def main():
                               f"until you do.{tail}")
                 else:
                     log.info(f"[feed] median lag {lag:.0f}ms (halt at {MAX_LAG}ms){tail}")
+                lat = execu.latency_summary()
+                if lat:
+                    log.info(f"[latency] {lat}")
                 last_lag_log = time.time()
         for sig in strat.poll(now):
             log.info(f"SIGNAL {sig.sleeve} {sig.coin} {'BUY' if sig.dir > 0 else 'SELL'} reach {sig.reach:.0f}bps "
@@ -145,8 +148,12 @@ async def main():
     c = execu.summary()
     fl = market.feed_lag_ms(1)
     log.info(f"feed lag median {fl:.0f}ms" if fl is not None else "feed lag: no samples")
+    lat = execu.latency_summary()
+    if lat:
+        log.info(f"[latency] {lat}")
     log.info(f"DONE reconnects {n_recon} orders {strat.n_orders} burst-cands {strat.n_sweeps} "
-             f"deep-cands {strat.n_deep} closed {len(c)} skipped-no-room {execu.n_skipped}")
+             f"deep-cands {strat.n_deep} closed {len(c)} skipped-no-room {execu.n_skipped} "
+             f"replayed-rejected {strat.n_replay}")
     if len(c):
         log.info(f"PnL total ${c.usd.sum():+.2f} on {len(c)} trades, mean {c.net_bps.mean():+.2f}bps, "
                  f"win {100 * (c.net_bps > 0).mean():.0f}%")

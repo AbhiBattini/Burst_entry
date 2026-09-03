@@ -10,6 +10,7 @@
 Both share the same interface: on_signal(sig), on_trade(coin,px,sz,de,t_ns), poll(now_ns)."""
 import os
 import datetime
+from collections import defaultdict, deque
 import numpy as np
 
 NS = 1_000_000_000
@@ -62,6 +63,12 @@ class PaperExecution:
         self.SHADOW = e.get("shadow_skipped", True)
         self.n_skipped = 0
         self.n_stale_ladder = 0
+        # Latency instrumentation. e2e_ms is measurable in PAPER (it needs no orders) and answers "are we
+        # actually hitting the te+cluster_s entry the backtest prices?". rtt_ms needs real sends and
+        # measures the send->inclusion leg, which is the one number the timing estimate could not measure.
+        # NB e2e compares an EXCHANGE stamp to a LOCAL clock, so it is only meaningful with NTP synced --
+        # check the [feed] line is not reporting a negative median before trusting it.
+        self.rtt = defaultdict(lambda: deque(maxlen=500))
         self.tradable = True
         self.feed_ok = True                         # set False by the latency guard (run.py)
         # CAP / SIZE / MINQ / RESERVE are set by apply_capital() — derived from wallet equity (src/capital.py),
@@ -79,6 +86,30 @@ class PaperExecution:
     def is_flat(self):
         """Shadows hold no capital, so they must not block a resize."""
         return not any(p["status"] != "closed" and not p.get("shadow") for p in self.positions)
+
+    def _timed(self, label, fn):
+        """Time one wire call. In dry_run this measures ~nothing (no send), which is itself the tell that
+        dry_run cannot produce a real round-trip distribution -- only `dry_run: false` can."""
+        import time as _t
+        t0 = _t.time_ns()
+        try:
+            return fn()
+        finally:
+            ms = (_t.time_ns() - t0) / 1e6
+            self.rtt[label].append(ms)
+            if ms > 1000:
+                self.log.warning(f"[latency] {label} took {ms:.0f}ms")
+
+    def latency_summary(self):
+        """Median / p90 per wire call, plus e2e. This is what replaces the ~200ms consensus ESTIMATE with
+        a measurement once real orders are being sent."""
+        out = []
+        for k in ("e2e", "entry", "post_exit", "cancel", "taker_close"):
+            v = self.rtt.get(k)
+            if v and len(v) >= 3:
+                a = np.asarray(v)
+                out.append(f"{k} n={len(a)} p50={np.median(a):.0f}ms p90={np.percentile(a, 90):.0f}ms")
+        return " | ".join(out)
 
     # --- capital rationing (§AC.2) ---------------------------------------
     def room_for(self, sleeve):
@@ -151,13 +182,15 @@ class PaperExecution:
         drift = self.entry_drift_bps(sig, bk)
         touch = bk["ask"] if buy else bk["bid"]
         slip = float(sig.dir * (pin - touch) / touch * 1e4) if touch else 0.0
+        e2e = (self._now() - sig.ts) / 1e6              # trigger (exchange stamp) -> our decision
+        self.rtt["e2e"].append(e2e)
         self.positions.append(dict(coin=sig.coin, dir=sig.dir, entry_ts=self._now(), entry_px=pin, size=size,
                                    status="open", breadth=sig.breadth, sw_span=sig.sw_span, sleeve=sig.sleeve,
-                                   drift_bps=drift, slip_bps=slip,
+                                   drift_bps=drift, slip_bps=slip, e2e_ms=e2e, rtt_ms=float("nan"),
                                    exit_level=None, q_ahead=0.0, q_you=0.0, cum=0.0, exit_start=0))
         self.log.info(f"[OPEN ] {sig.sleeve} {sig.coin} {'LONG' if buy else 'SHORT'} @ {pin:.6g} "
                       f"${size:,.0f} breadth {sig.breadth} reach {sig.reach:.0f}bps "
-                      f"drift {drift:+.1f}bps slip {slip:+.1f}bps")
+                      f"drift {drift:+.1f}bps slip {slip:+.1f}bps e2e {e2e:.0f}ms")
 
     def _open_shadow(self, sig, bk):
         """A signal we could not fund, run through the SAME lifecycle so we can price the opportunity cost of
@@ -228,7 +261,9 @@ class PaperExecution:
                                 size=pos["size"], exit_px=exit_px, kind=kind, net_bps=net, usd=net * pos["size"] / 1e4,
                                 breadth=pos["breadth"], sw_span=pos["sw_span"],
                                 drift_bps=pos.get("drift_bps", float("nan")),
-                                slip_bps=pos.get("slip_bps", float("nan"))))
+                                slip_bps=pos.get("slip_bps", float("nan")),
+                                e2e_ms=pos.get("e2e_ms", float("nan")),
+                                rtt_ms=pos.get("rtt_ms", float("nan"))))
         self.log.info(f"[CLOSE] {pos.get('sleeve','BURST')} {pos['coin']} {kind} "
                       f"net {net:+.1f}bps ${net * pos['size'] / 1e4:+.2f}")
 
@@ -372,19 +407,22 @@ class LiveExecution(PaperExecution):
         if size < self.MINQ:
             return
         coin_sz = round(size / touch, 6)
-        fill_px = self._live_taker(sig.coin, buy, coin_sz, size, touch)     # entry send (dry logs, returns modeled)
+        fill_px = self._timed("entry", lambda: self._live_taker(sig.coin, buy, coin_sz, size, touch))
         if not np.isfinite(fill_px) or fill_px <= 0:
             self.log.error(f"[entry ABORT] {sig.coin} no valid fill px -> not tracking a phantom position"); return
         drift = self.entry_drift_bps(sig, bk)
         slip = float(sig.dir * (fill_px - touch) / touch * 1e4) if touch else 0.0
+        e2e = (self._now() - sig.ts) / 1e6            # trigger -> fill acknowledged (the WHOLE chain)
+        rtt = (self.rtt["entry"][-1] if self.rtt["entry"] else float("nan"))
+        self.rtt["e2e"].append(e2e)
         self.positions.append(dict(coin=sig.coin, dir=sig.dir, entry_ts=self._now(), entry_px=fill_px, size=size,
                                    status="open", breadth=sig.breadth, sw_span=sig.sw_span, sleeve=sig.sleeve,
-                                   drift_bps=drift, slip_bps=slip,
+                                   drift_bps=drift, slip_bps=slip, e2e_ms=e2e, rtt_ms=rtt,
                                    exit_level=None, q_ahead=0.0, q_you=0.0, cum=0.0, exit_start=0,
                                    exit_oid=None, last_poll=0))
         self.log.info(f"[OPEN ] {sig.sleeve} {sig.coin} {'LONG' if buy else 'SHORT'} @ {fill_px:.6g} "
                       f"${size:,.0f} breadth {sig.breadth} reach {sig.reach:.0f}bps "
-                      f"drift {drift:+.1f}bps slip {slip:+.1f}bps")
+                      f"drift {drift:+.1f}bps slip {slip:+.1f}bps e2e {e2e:.0f}ms send {rtt:.0f}ms")
 
     # --- lifecycle (full reimpl so live code is what dry_run exercises) --
     def poll(self, now_ns):
@@ -395,8 +433,9 @@ class LiveExecution(PaperExecution):
             de, mid, age = pos["dir"], bk["mid"], (now_ns - pos["entry_ts"]) / NS
             # (1) 100 bps path stop — always active. Cancel any resting exit, then TAKER close.
             if de * (mid - pos["entry_px"]) / pos["entry_px"] * 1e4 <= -self.STOP:
-                self._live_cancel(pos)
-                self._close(pos, self._live_taker_close(pos, bk), "stop"); continue
+                self._timed("cancel", lambda: self._live_cancel(pos))
+                self._close(pos, self._timed("taker_close", lambda: self._live_taker_close(pos, bk)),
+                            "stop"); continue
             # (2) hold elapsed -> post a maker-improve reduce-only limit exit
             if pos["status"] == "open" and age >= self.HOLD:
                 tk = self.m.tick.get(pos["coin"], 0.0) * self.TICKS; buy = de > 0
@@ -408,7 +447,7 @@ class LiveExecution(PaperExecution):
                 pos.update(exit_level=lvl,
                            q_ahead=0.0 if improved else ((bk.get("ask_sz") if buy else bk.get("bid_sz")) or 0.0),
                            q_you=pos["size"] / lvl, status="exiting", exit_start=now_ns, cum=0.0, last_poll=0)
-                pos["exit_oid"] = self._live_post_exit(pos, lvl)
+                pos["exit_oid"] = self._timed("post_exit", lambda: self._live_post_exit(pos, lvl))
             # (3) exiting -> query real fill; TAKER-fallback for the remainder at window end
             elif pos["status"] == "exiting":
                 filled_frac = self._live_exit_fill_frac(pos, now_ns)       # 0..1 of the position filled maker
@@ -416,8 +455,8 @@ class LiveExecution(PaperExecution):
                     self._live_cancel(pos)
                     self._close(pos, pos["exit_level"], "maker"); continue
                 if (now_ns - pos["exit_start"]) / NS >= self.EXW:          # window end: cancel + taker remainder
-                    self._live_cancel(pos)
-                    p_tk = self._live_taker_close(pos, bk)
+                    self._timed("cancel", lambda: self._live_cancel(pos))
+                    p_tk = self._timed("taker_close", lambda: self._live_taker_close(pos, bk))
                     blended = filled_frac * pos["exit_level"] + (1 - filled_frac) * p_tk
                     self._close(pos, blended, "maker" if filled_frac > 0.5 else "taker")
 
