@@ -138,7 +138,8 @@ class StrategyA:
         self.REPLAY_MS = d.get("replay_tolerance_ms", 1000)
         self.AGG_NS = int(d["agg_gap_ms"] * 1e6)
         self.BW, self.MINK = b["window_s"] * NS, b["min_k"]
-        self.CLUS, self.SWMINC, self.SWREF = s["cluster_s"], s["min_count"], s["refresh"]
+        self.CLUS, self.SWMINC = s["cluster_s"], s["min_count"]
+        self.SWWIN = s.get("win", s.get("hist_len", 20))
         self.COOL = bu["cooldown_s"] * NS
         self.NMAX = 1                    # set by apply_capital() — derived from equity (src/capital.py)
         self.DEEP_ON = dp["enabled"]; self.DEEP_FLOOR = dp["reach_floor_bps"]
@@ -153,8 +154,14 @@ class StrategyA:
         self.last_cand = defaultdict(lambda: -(1 << 62))  # coin -> ts of last BURST candidate (non-overlap)
         self.last_deep = defaultdict(lambda: -(1 << 62))  # coin -> ts of last DEEP  candidate (non-overlap)
         self.sweeps = deque()                            # non-overlapped BURST candidates, for breadth
-        self.swhist = deque(maxlen=s["hist_len"]); self.swsince = 0
-        self.swmed = seed.get("swspan_median") or float("inf")
+        # §AH.15: the sw_span threshold is PER TOKEN, not global. sw_span scales with book width, so one
+        # global median is a TOKEN filter (pass rate 5%-93% across books, corr with the token's own median
+        # +0.966) rather than an opportunity gate. Per-token it gates ~50% everywhere and generalises far
+        # better OOS (t(day) +3.99 vs +0.27 for the global version). Short window: the distribution drifts,
+        # so win=20 beat win=50 out of sample. Seeded per token until a book has its own history.
+        self.swhist = defaultdict(lambda: deque(maxlen=self.SWWIN))
+        self.swseed = seed.get("swspan_median_by_token", {}) or {}
+        self.swmed_global = seed.get("swspan_median") or float("inf")
         self.pending = []; self.fired = {1.0: deque(), -1.0: deque()}
         self.clock_hours = set(cfg.get("clock", {}).get("restrict_utc_hours") or [])
         self.n_orders = self.n_sweeps = self.n_deep = self.n_replay = 0
@@ -247,10 +254,12 @@ class StrategyA:
                 if (coin, te) not in burst_fired:               # BURST wins an exact duplicate
                     out.append(Signal(coin, de, 0, span, te, "DEEP", p["reach"], p["vol"], p["ref"]))
                 continue
-            self.swhist.append(span); self.swsince += 1         # the median tracks BURST candidates
-            if self.swsince >= self.SWREF and len(self.swhist) >= self.SWMINC:
-                self.swmed = float(np.median(self.swhist)); self.swsince = 0
-            if p["breadth"] < self.MINK or span < self.swmed:
+            # threshold from this token's PRIOR candidates only, then record (strictly causal)
+            hb = self.swhist[coin]
+            thr = (float(np.median(hb)) if len(hb) >= self.SWMINC
+                   else self.swseed.get(coin, self.swmed_global))
+            hb.append(span)
+            if p["breadth"] < self.MINK or span < thr:
                 continue
             q = self.fired[de]                                  # dedup: nmax entries / direction / cooldown
             while q and te - q[0] > self.COOL:

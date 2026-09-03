@@ -345,5 +345,51 @@ ex9.on_signal(Sig("AAA", 1.0, "BURST"))
 check("stale ladder does NOT create a shadow (not a capital skip)",
       len([p for p in ex9.positions if p.get("shadow")]) == n_shadow_before)
 
+# ── 10. per-token rolling sw_span median (§AH.15) ───────────────────────────────────────────────────
+print("\n10. sw_span threshold is PER TOKEN and causal")
+cfgA = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+cfgA["universe"] = COINS; cfgA["_root"] = ROOT
+cfgA["detection"].update(reach_min_count=10 ** 9)
+cfgA["swspan"].update(win=4, min_count=2)
+cfgA["deep"]["enabled"] = False   # DEEP has no sw_span gate; it would mask this test
+cfgA["breadth"]["min_k"] = 0      # isolate sw_span: breadth is a separate gate, tested in §2
+seedA = {"reach_p998": {c: 30.0 for c in COINS},
+         "swspan_median": 999.0,                      # global fallback deliberately unreachable
+         "swspan_median_by_token": {"AAA": 10.0, "BBB": 90.0}}
+mA = MarketState(vol_grid_s=1, vol_win=8)
+lgA = logging.getLogger("st10"); lgA.addHandler(logging.NullHandler())
+sA = StrategyA(cfgA, seedA, mA)
+check("per-token seeds are loaded", sA.swseed == {"AAA": 10.0, "BBB": 90.0}, f"{sA.swseed}")
+check("global median kept only as fallback", sA.swmed_global == 999.0)
+
+# each token must use ITS OWN seed, not one global number
+t = warm_vol(mA, COINS, NS * 10_000)
+t1 = sweep(sA, mA, "AAA", t + NS, +1, 60.0); sigA = sA.poll(t1 + NS)   # 60bps span vs AAA seed 10 -> fires
+t2 = sweep(sA, mA, "BBB", t1 + NS, +1, 60.0); sigB = sA.poll(t2 + NS)  # 60bps span vs BBB seed 90 -> blocked
+check("low-seed token fires on a 60bps span",
+      any(s.coin == "AAA" and s.sleeve == "BURST" for s in sigA), f"{[(s.coin,s.sleeve) for s in sigA]}")
+check("high-seed token is blocked by ITS OWN seed",
+      not any(s.coin == "BBB" and s.sleeve == "BURST" for s in sigB), f"{[(s.coin,s.sleeve) for s in sigB]}")
+
+# the threshold must come from PRIOR observations only, never the current one
+cfgB = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+cfgB["universe"] = COINS; cfgB["_root"] = ROOT
+cfgB["detection"].update(reach_min_count=10 ** 9)
+cfgB["swspan"].update(win=10, min_count=2)
+cfgB["deep"]["enabled"] = False
+cfgB["breadth"]["min_k"] = 0
+mB = MarketState(vol_grid_s=1, vol_win=8)
+sB = StrategyA(cfgB, {"reach_p998": {c: 30.0 for c in COINS}, "swspan_median": 40.0}, mB)
+sB.swhist["AAA"].extend([10.0, 20.0])                # own history -> median 15
+tb = warm_vol(mB, COINS, NS * 10_000)
+tb1 = sweep(sB, mB, "AAA", tb + NS, +1, 60.0)
+n_before = len(sB.swhist["AAA"])
+sigC = sB.poll(tb1 + NS)
+check("uses own rolling median once warm (fires at 60 vs 15)",
+      any(s.coin == "AAA" and s.sleeve == "BURST" for s in sigC), f"{[(s.coin,s.sleeve) for s in sigC]}")
+check("observation is recorded AFTER the test (causal)", len(sB.swhist["AAA"]) == n_before + 1,
+      f"{n_before} -> {len(sB.swhist['AAA'])}")
+check("window is bounded", sB.swhist["AAA"].maxlen == 10, f"{sB.swhist['AAA'].maxlen}")
+
 print(f"\n{'ALL PASS' if not FAILS else 'FAILURES: ' + ', '.join(FAILS)}")
 sys.exit(1 if FAILS else 0)

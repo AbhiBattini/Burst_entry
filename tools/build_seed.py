@@ -28,9 +28,26 @@ HERE = Path(__file__).resolve().parent          # .../Github_for_live/tools
 REPO = HERE.parent                              # .../Github_for_live
 TRACK = REPO.parent                             # .../69_informed_sweep_follow
 BASE = TRACK.parents[0] / "shared" / "data_cache"
-POOL = TRACK / "A_book" / "june31_ladder.parquet"
+POOL = TRACK / "A_book" / "june31_fresh_pool.parquet"   # CLEAN pool (§AH.7) -- never the contaminated one
 UNI = json.loads((TRACK / "A_book" / "universe.json").read_text())["calm31"]["tokens"]
-FRESH_MS = 100.0; GAPNS = 100_000_000; FIXED = 30.0; NS = 1_000_000_000
+FRESH_MS = 100.0; GAPNS = 100_000_000; FIXED = 10.0; NS = 1_000_000_000   # FIXED: fresh-scale floor
+
+
+def swspan_median_by_token(P):
+    """§AH.15: the sw_span gate is PER TOKEN. A global median is a TOKEN filter (pass rate 5%-93% across
+    books, corr +0.966 with the token's own median) rather than an opportunity gate. These seeds carry a
+    book until it has `swspan.min_count` of its own candidates."""
+    HOLD_NS = int((0.4 + 120) * NS)
+    S = P[P.reach.values >= np.maximum(FIXED, P.p998.values)]
+    keep = []
+    for _, g in S.groupby("token"):
+        busy = -1
+        for i, t in zip(g.index.values, g.ts.values.astype(np.int64)):
+            if t < busy: continue
+            keep.append(i); busy = t + HOLD_NS
+    C = P.loc[keep]
+    return {t: round(float(v), 2) for t, v in C.groupby("token").sw_span.median().items()
+            if (C.token == t).sum() >= 10}
 
 
 def canonical_swspan_median(P):
@@ -103,6 +120,7 @@ seed, med = from_archive() if "--from-archive" in sys.argv else from_pool()
 out = {"_doc": "Seeds the live rolling thresholds at t0. reach_p998 = per-token p99.8 of ORDER-aggregated "
                 "reach (§AB.3); swspan_median = global BURST cluster-depth gate. Rebuild with tools/build_seed.py.",
        "_source": "june31_ladder.parquet (--from-archive to recompute from raw HL cache)",
-       "reach_p998": seed, "swspan_median": round(med, 2)}
+       "reach_p998": seed, "swspan_median": round(med, 2),
+       "swspan_median_by_token": swspan_median_by_token(pd.read_parquet(POOL))}
 (REPO / "seed.json").write_text(json.dumps(out, indent=2))
 print(f"\n{len(seed)} tokens seeded, sw_span median {out['swspan_median']} -> seed.json")

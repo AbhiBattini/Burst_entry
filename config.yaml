@@ -46,11 +46,15 @@ breadth:                        # the common-factor gate (BURST only)
                                 # cascade guard — breadth is ELEVATED in a cascade, so k>=3 tilts you TOWARD
                                 # cascade days and costs 58% of calm PnL (§AF).
 
-swspan:                         # cluster-depth gate (BURST only)
+swspan:                         # cluster-depth gate (BURST only) — PER TOKEN (§AH.15)
   cluster_s: 0.4                # forward cluster window after the trigger (also the reaction budget)
-  hist_len: 4000
-  min_count: 30                 # warm-up before the rolling median overrides the seed
-  refresh: 20
+  win: 20                       # rolling window of that token's own recent sw_span. SHORT on purpose: the
+                                # distribution drifts, and win=20 beat win=50 OUT of sample (t +3.99 vs
+                                # +2.08) despite being slightly worse in-sample.
+  min_count: 20                 # a token uses its OWN rolling median only after this many of its own
+                                # candidates; until then it uses its seeded median. A GLOBAL threshold is a
+                                # TOKEN filter, not an opportunity gate: pass rate ran 5%-93% across books
+                                # and correlated +0.966 with the token's own median sw_span.
 
 capital:                        # THE ONE PLACE MONEY IS CONFIGURED. Everything else is derived from equity.
   mode: auto                    # auto = read wallet equity (needs HL_ACCOUNT_ADDRESS; no private key needed,
