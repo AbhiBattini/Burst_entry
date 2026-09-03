@@ -21,6 +21,63 @@ Everything below assumes the service install (`bash setup.sh --service`) on the 
 
 ---
 
+## 0b. Bringing up a FRESH box
+
+**Instance:** AWS **`ap-northeast-1` (Tokyo)** — this is the only latency choice that matters, HL's validators
+are there. Ubuntu Server 24.04 LTS **(Arm)** for `c7g.medium`, or x86 for a `t3.*`. 50 GiB gp3. Security group
+SSH from **My IP** only. Any AZ (research puts validators in az1/2/4; cross-AZ is ~0.3–2 ms against a ~200 ms
+consensus floor, so it does not matter).
+
+```bash
+sudo apt-get update && sudo apt-get install -y python3-venv python3-pip git
+```
+
+Clock sync — the feed-lag guard depends on it (`System clock synchronized: yes`):
+
+```bash
+timedatectl
+```
+
+```bash
+git clone https://github.com/AbhiBattini/Burst_entry.git && cd Burst_entry
+```
+
+```bash
+bash setup.sh
+```
+
+```bash
+.venv/bin/python tools/selftest.py
+```
+
+**Verify the feed before trusting any run** — this is the check that would have caught the 5.4 s stale-touch
+bug. Want `fresh%` ~99 %, book age median ~0 ms, `bbo/s` ~2–10, `l2/s` ~0.2:
+
+```bash
+.venv/bin/python tools/feed_doctor.py 120
+```
+
+Confirm the network placement took (~1–15 ms connect; 100 ms+ means the wrong region):
+
+```bash
+curl -o /dev/null -s -w "connect %{time_connect}s  total %{time_total}s
+" https://api.hyperliquid.xyz/info
+```
+
+Then install the service and watch it:
+
+```bash
+bash setup.sh --service
+```
+
+```bash
+journalctl -u strat-a -f
+```
+
+The `START` line should read `mode=paper`, `universe=31`, `seed=31tok`, and the equity/sizing you expect.
+
+---
+
 ## 1. Service control
 
 ```bash
@@ -77,7 +134,7 @@ journalctl -u strat-a -p warning --since "6 hours ago"
 | `SIGNAL` | a gated signal fired (BURST or DEEP) |
 | `[OPEN ]` | position opened (paper) |
 | `[CLOSE]` | position closed — carries `maker`/`taker`/`stop` and net bps |
-| `[SKIP ]` | signal not funded — no capital room |
+| `[SKIP ]` | signal not taken. THREE distinct reasons, and the line says which: **no room** (capital — the only one that feeds the shadow book), **drift** (the move already happened), **ladder stale** (depth book too old to size against) |
 | `[SHADOW]` | a skipped signal's counterfactual result (**not traded**) |
 | `flush` | recorder wrote parquet; carries cumulative traded and shadow P&L |
 
@@ -199,7 +256,7 @@ Compare against these before concluding anything is wrong.
 | l2Book updates | ~0.2 /s /coin (~5.4 s gap) — depth only | measured 2026-09-03 |
 | Orders passing `fresh_ms` | **~99%** | with bbo as the touch |
 | Reconnects | rare; each leaves a ~3 s gap | — |
-| Recorder disk | ~400 MB/day | 31 books × ~2 L2 snaps/s |
+| Recorder disk | **~50 MB/day** (measure it) | l2Book is only ~0.2/s, so ~10x less than the 400 MB/day first assumed at 2/s |
 
 Rate is **not** uniform — §Z.8 found the edge concentrates 14–17 UTC, so expect clustering. Judge over a
 full day or more; hour-to-hour counts are Poisson noise at n≈1.
@@ -291,7 +348,8 @@ Clock sync — the feed-lag guard depends on it (`System clock synchronized: yes
 timedatectl
 ```
 
-Disk — **a full disk crashes the strategy**; the recorder writes ~400 MB/day:
+Disk — **a full disk crashes the strategy**. Original estimate was ~400 MB/day assuming 2 L2 snaps/s/coin; the
+public l2Book turned out to be ~0.2/s, so expect roughly **~50 MB/day**. Measure rather than trust either number:
 
 ```bash
 df -h / && du -sh ~/Burst_entry/data
